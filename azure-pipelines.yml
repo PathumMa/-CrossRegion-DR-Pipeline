@@ -1,0 +1,53 @@
+trigger:
+  branches:
+    include:
+      - master
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  acrName: 'fc6p01es'
+  imageName: 'demo-api'
+  imageTag: '$(Build.BuildId)'
+  containerAppName: 'ca-demo-api'
+  resourceGroup: 'rg-cncs-fc6p01es'
+
+stages:
+  - stage: BuildAndPush
+    displayName: 'Build image and push to ACR'
+    jobs:
+      - job: BuildPush
+        displayName: 'Build and push'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'az acr build'
+            inputs:
+              azureSubscription: 'azure-student-subscription'   # name of your Service Connection
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az acr build \
+                  --registry $(acrName) \
+                  --image $(imageName):$(imageTag) \
+                  --image $(imageName):latest \
+                  .
+
+  - stage: Deploy
+    displayName: 'Deploy to Azure Container Apps'
+    dependsOn: BuildAndPush
+    jobs:
+      - job: DeployContainerApp
+        displayName: 'Update Container App'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'az containerapp update'
+            inputs:
+              azureSubscription: 'azure-student-subscription'   # name of your Service Connection
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az containerapp update \
+                  --name $(containerAppName) \
+                  --resource-group $(resourceGroup) \
+                  --image $(acrName).azurecr.io/$(imageName):$(imageTag)
