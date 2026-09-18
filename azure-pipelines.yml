@@ -50,4 +50,5 @@ stages:
                 az containerapp update \
                   --name $(containerAppName) \
                   --resource-group $(resourceGroup) \
-                  --image $(acrName).azurecr.io/$(imageName):$(imageTag)
+                  --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
+                  --set-env-vars REGION="Central India" APP_VERSION="$(imageTag)"
