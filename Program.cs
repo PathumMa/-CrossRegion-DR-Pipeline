@@ -24,7 +24,7 @@ app.MapGet("/", () =>
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Cross-Region DR Pipeline - Demo App</title>
+            <title>Welcome - Cross-Region DR Pipeline - Demo App</title>
             <style>
                 body {{ font-family: Segoe UI, Arial, sans-serif; background: #21295C; color: #fff; text-align: center; padding-top: 60px; }}
                 h1 {{ font-size: 2rem; }}
