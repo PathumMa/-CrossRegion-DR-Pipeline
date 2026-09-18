@@ -20,19 +20,19 @@ app.MapGet("/", () =>
     var version = Environment.GetEnvironmentVariable("APP_VERSION") ?? "local-dev";
     var now = DateTime.UtcNow;
 
-    var html = $"""
+    var html = """
         <!DOCTYPE html>
         <html>
         <head>
             <title>Welcome - Cross-Region DR Pipeline - Demo App</title>
             <style>
-                body {{ font-family: Segoe UI, Arial, sans-serif; background: #21295C; color: #fff; text-align: center; padding-top: 60px; }}
-                h1 {{ font-size: 2rem; }}
-                p {{ color: #9ab; }}
-                a {{ color: #7fd0e0; }}
-                .meta {{ margin-top: 40px; display: inline-block; text-align: left; background: rgba(255,255,255,0.06); border-radius: 8px; padding: 20px 30px; }}
-                .meta div {{ margin: 6px 0; font-size: 0.95rem; }}
-                .label {{ color: #7fd0e0; font-weight: 600; display: inline-block; width: 110px; }}
+                body { font-family: Segoe UI, Arial, sans-serif; background: #21295C; color: #fff; text-align: center; padding-top: 60px; }
+                h1 { font-size: 2rem; }
+                p { color: #9ab; }
+                a { color: #7fd0e0; }
+                .meta { margin-top: 40px; display: inline-block; text-align: left; background: rgba(255,255,255,0.06); border-radius: 8px; padding: 20px 30px; }
+                .meta div { margin: 6px 0; font-size: 0.95rem; }
+                .label { color: #7fd0e0; font-weight: 600; display: inline-block; width: 110px; }
             </style>
         </head>
         <body>
@@ -41,13 +41,18 @@ app.MapGet("/", () =>
             <p>Try the sample API: <a href="/weatherforecast">/weatherforecast</a> &nbsp;|&nbsp; API docs: <a href="/swagger">/swagger</a></p>
 
             <div class="meta">
-                <div><span class="label">Region:</span> {region}</div>
-                <div><span class="label">Version:</span> {version}</div>
-                <div><span class="label">Server time (UTC):</span> {now:yyyy-MM-dd HH:mm:ss}</div>
+                <div><span class="label">Region:</span> __REGION__</div>
+                <div><span class="label">Version:</span> __VERSION__</div>
+                <div><span class="label">Server time (UTC):</span> __TIME__</div>
             </div>
         </body>
         </html>
         """;
+
+    html = html
+        .Replace("__REGION__", region)
+        .Replace("__VERSION__", version)
+        .Replace("__TIME__", now.ToString("yyyy-MM-dd HH:mm:ss"));
 
     return Results.Content(html, "text/html");
 });
