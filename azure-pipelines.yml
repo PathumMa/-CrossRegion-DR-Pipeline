@@ -21,17 +21,17 @@ stages:
         displayName: 'Build and push'
         steps:
           - task: AzureCLI@2
-            displayName: 'az acr build'
+            displayName: 'Build and push image (docker, via agent)'
             inputs:
               azureSubscription: 'azure-student-subscription'   # name of your Service Connection
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                az acr build \
-                  --registry $(acrName) \
-                  --image $(imageName):$(imageTag) \
-                  --image $(imageName):latest \
-                  .
+                set -e
+                az acr login --name $(acrName)
+                docker build -t $(acrName).azurecr.io/$(imageName):$(imageTag) -t $(acrName).azurecr.io/$(imageName):latest .
+                docker push $(acrName).azurecr.io/$(imageName):$(imageTag)
+                docker push $(acrName).azurecr.io/$(imageName):latest
 
   - stage: Deploy
     displayName: 'Deploy to Azure Container Apps'
