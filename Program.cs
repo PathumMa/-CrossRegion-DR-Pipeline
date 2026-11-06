@@ -38,7 +38,7 @@ app.MapGet("/", () =>
         <body>
             <h1>Cross-Region DR Pipeline &mdash; Demo Application</h1>
             <p>This is a sample ASP.NET Web API used to validate the CI/CD pipeline.</p>
-            <p>Try the sample API: <a href="/weatherforecast">/weatherforecast</a> &nbsp;|&nbsp; API docs: <a href="/swagger">/swagger</a></p>
+            <p>Try the sample API: <a href="/weatherforecast">/weatherforecast</a> &nbsp;|&nbsp; Health details: <a href="/health">/health</a> &nbsp;|&nbsp; API docs: <a href="/swagger">/swagger</a></p>
 
             <div class="meta">
                 <div><span class="label">Region:</span> __REGION__</div>
@@ -57,10 +57,17 @@ app.MapGet("/", () =>
     return Results.Content(html, "text/html");
 });
 
-app.MapGet("/health", () => TypedResults.Ok(new { status = "Healthy" }))
+app.MapGet("/health", () => TypedResults.Ok(new
+{
+    status = "Healthy",
+    region = Environment.GetEnvironmentVariable("REGION") ?? "Unknown region",
+    version = Environment.GetEnvironmentVariable("APP_VERSION") ?? "local-dev",
+    commit = Environment.GetEnvironmentVariable("GIT_COMMIT") ?? "unknown",
+    checkedAtUtc = DateTimeOffset.UtcNow
+}))
     .WithName("GetHealth")
-    .WithSummary("Check application health")
-    .WithDescription("Returns a healthy status when the application is running.")
+    .WithSummary("Check application health and deployment details")
+    .WithDescription("Returns the application health status and deployment metadata.")
     .Produces(StatusCodes.Status200OK);
 
 // Sample API endpoint (kept from the default template)
