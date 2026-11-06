@@ -1,54 +1,60 @@
 trigger:
   branches:
     include:
-      - master
+    - master
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  acrName: 'fc6p01es'
-  imageName: 'demo-api'
-  imageTag: '$(Build.BuildId)'
-  containerAppName: 'ca-demo-api'
-  resourceGroup: 'rg-cncs-fc6p01es'
+- name: acrName
+  value: 'fc6p01es' 
+- name: imageName
+  value: 'demo-api'
+- name: imageTag
+  value: '$(Build.BuildId)'
+- name: containerAppName
+  value: 'ca-demo-api-sea'
+- name: resourceGroup
+  value: 'rg-docflo-demo-sea-01'    
 
 stages:
-  - stage: BuildAndPush
-    displayName: 'Build image and push to ACR'
-    jobs:
-      - job: BuildPush
-        displayName: 'Build and push'
-        steps:
-          - task: AzureCLI@2
-            displayName: 'Build and push image (docker, via agent)'
-            inputs:
-              azureSubscription: 'azure-student-subscription'   # name of your Service Connection
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                set -e
-                az acr login --name $(acrName)
-                docker build -t $(acrName).azurecr.io/$(imageName):$(imageTag) -t $(acrName).azurecr.io/$(imageName):latest .
-                docker push $(acrName).azurecr.io/$(imageName):$(imageTag)
-                docker push $(acrName).azurecr.io/$(imageName):latest
+- stage: BuildAndPush
+  displayName: 'Build image and push to ACR'
+  jobs:
+  - job: BuildPush
+    displayName: 'Build and push'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Build and push image (docker, via agent)'
+      inputs:
+        azureSubscription: 'azure-student-subscription'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az acr login --name $(acrName)
+          docker build -t $(acrName).azurecr.io/$(imageName):$(imageTag) -t $(acrName).azurecr.io/$(imageName):latest .
+          docker push $(acrName).azurecr.io/$(imageName):$(imageTag)
+          docker push $(acrName).azurecr.io/$(imageName):latest
 
-  - stage: Deploy
-    displayName: 'Deploy to Azure Container Apps'
-    dependsOn: BuildAndPush
-    jobs:
-      - job: DeployContainerApp
-        displayName: 'Update Container App'
-        steps:
-          - task: AzureCLI@2
-            displayName: 'az containerapp update'
-            inputs:
-              azureSubscription: 'azure-student-subscription'   # name of your Service Connection
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                az containerapp update \
-                  --name $(containerAppName) \
-                  --resource-group $(resourceGroup) \
-                  --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
-                  --set-env-vars REGION="Central India" APP_VERSION="$(imageTag)"
+- stage: Deploy
+  displayName: 'Deploy to Azure Container Apps'
+  dependsOn:
+  - BuildAndPush
+  jobs:
+  - job: DeployContainerApp
+    displayName: 'Update Container App'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'az containerapp update'
+      inputs:
+        azureSubscription: 'azure-org-subscription'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |-
+          az containerapp update \
+            --name $(containerAppName) \
+            --resource-group $(resourceGroup) \
+            --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
+            --set-env-vars REGION="Central India" APP_VERSION="$(imageTag)"
