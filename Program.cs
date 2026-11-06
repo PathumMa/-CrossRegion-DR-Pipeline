@@ -36,8 +36,8 @@ app.MapGet("/", () =>
             </style>
         </head>
         <body>
-            <h1>Cross-Region DR Pipeline &mdash; Demo Application</h1>
-            <p>This is a sample ASP.NET Web API used to validate the CI/CD pipeline.</p>
+            <h1>Cross-Region DR &mdash; Demo Application</h1>
+            <p>A demonstration API for showcasing cross-region deployments and service health.</p>
             <p>Try the sample API: <a href="/weatherforecast">/weatherforecast</a> &nbsp;|&nbsp; Health details: <a href="/health">/health</a> &nbsp;|&nbsp; API docs: <a href="/swagger">/swagger</a></p>
 
             <div class="meta">
