@@ -1,3 +1,5 @@
+name: 'v1.0.$(Rev:r)'
+
 trigger:
   branches:
     include:
@@ -8,25 +10,31 @@ pool:
 
 variables:
 - name: acrName
-  value: 'fc6p01es' 
+  value: 'fc6p01es'
 - name: imageName
   value: 'demo-api'
 - name: imageTag
-  value: '$(Build.BuildId)'
-- name: containerAppName
+  value: '$(Build.BuildNumber)'
+- name: orgConnection
+  value: 'azure-org-subscription'
+- name: primaryApp
   value: 'ca-demo-api-sea'
-- name: resourceGroup
-  value: 'rg-docflo-demo-sea-01'    
+- name: primaryRg
+  value: 'rg-docflo-demo-sea-01'
+- name: secondaryApp
+  value: 'ca-demo-api-ea'
+- name: secondaryRg
+  value: 'rg-docflo-demo-ea-01'
 
 stages:
 - stage: BuildAndPush
-  displayName: 'Build image and push to ACR'
+  displayName: 'Build and push image'
   jobs:
   - job: BuildPush
     displayName: 'Build and push'
     steps:
     - task: AzureCLI@2
-      displayName: 'Build and push image (docker, via agent)'
+      displayName: 'Build and push image to ACR'
       inputs:
         azureSubscription: 'azure-student-subscription'
         scriptType: 'bash'
@@ -34,27 +42,57 @@ stages:
         inlineScript: |
           set -e
           az acr login --name $(acrName)
-          docker build -t $(acrName).azurecr.io/$(imageName):$(imageTag) -t $(acrName).azurecr.io/$(imageName):latest .
+          docker build -t $(acrName).azurecr.io/$(imageName):$(imageTag) .
           docker push $(acrName).azurecr.io/$(imageName):$(imageTag)
-          docker push $(acrName).azurecr.io/$(imageName):latest
 
-- stage: Deploy
-  displayName: 'Deploy to Azure Container Apps'
-  dependsOn:
-  - BuildAndPush
+- stage: DeploySecondary
+  displayName: 'Deploy to East Asia (standby)'
+  dependsOn: BuildAndPush
   jobs:
-  - job: DeployContainerApp
-    displayName: 'Update Container App'
+  - job: Deploy
+    displayName: 'Update East Asia app'
     steps:
     - task: AzureCLI@2
-      displayName: 'az containerapp update'
+      displayName: 'Update app and smoke test'
       inputs:
-        azureSubscription: 'azure-org-subscription'
+        azureSubscription: $(orgConnection)
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
-        inlineScript: |-
+        inlineScript: |
+          set -e
           az containerapp update \
-            --name $(containerAppName) \
-            --resource-group $(resourceGroup) \
+            --name $(secondaryApp) \
+            --resource-group $(secondaryRg) \
             --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
-            --set-env-vars REGION="Central India" APP_VERSION="$(imageTag)"
+            --set-env-vars REGION="East Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)"
+          FQDN=$(az containerapp show \
+            --name $(secondaryApp) \
+            --resource-group $(secondaryRg) \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          curl --fail --retry 10 --retry-delay 6 --retry-all-errors https://$FQDN/health
+
+- stage: DeployPrimary
+  displayName: 'Deploy to Southeast Asia (primary)'
+  dependsOn: DeploySecondary
+  jobs:
+  - job: Deploy
+    displayName: 'Update Southeast Asia app'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Update app and smoke test'
+      inputs:
+        azureSubscription: $(orgConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az containerapp update \
+            --name $(primaryApp) \
+            --resource-group $(primaryRg) \
+            --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
+            --set-env-vars REGION="Southeast Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)"
+          FQDN=$(az containerapp show \
+            --name $(primaryApp) \
+            --resource-group $(primaryRg) \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          curl --fail --retry 10 --retry-delay 6 --retry-all-errors https://$FQDN/health
