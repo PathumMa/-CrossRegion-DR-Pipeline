@@ -57,6 +57,12 @@ app.MapGet("/", () =>
     return Results.Content(html, "text/html");
 });
 
+app.MapGet("/health", () => TypedResults.Ok(new { status = "Healthy" }))
+    .WithName("GetHealth")
+    .WithSummary("Check application health")
+    .WithDescription("Returns a healthy status when the application is running.")
+    .Produces(StatusCodes.Status200OK);
+
 // Sample API endpoint (kept from the default template)
 var summaries = new[]
 {
