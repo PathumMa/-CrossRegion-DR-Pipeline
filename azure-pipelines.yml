@@ -1,0 +1,100 @@
+name: 'v1.0.$(Rev:r)'
+
+trigger:
+  branches:
+    include:
+    - master
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- name: acrName
+  value: 'fc6p01es'
+- name: imageName
+  value: 'demo-api'
+- name: imageTag
+  value: '$(Build.BuildNumber)'
+- name: orgConnection
+  value: 'azure-org-subscription'
+- name: primaryApp
+  value: 'ca-demo-api-sea'
+- name: primaryRg
+  value: 'rg-docflo-demo-sea-01'
+- name: secondaryApp
+  value: 'ca-demo-api-ea'
+- name: secondaryRg
+  value: 'rg-docflo-demo-ea-01'
+- name: frontDoorId
+  value: '6bec47d5-d01c-4560-a1c1-74c7d32c68dd'
+
+stages:
+- stage: BuildAndPush
+  displayName: 'Build and push image'
+  jobs:
+  - job: BuildPush
+    displayName: 'Build and push'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Build and push image to ACR'
+      inputs:
+        azureSubscription: 'azure-student-subscription'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az acr login --name $(acrName)
+          docker build -t $(acrName).azurecr.io/$(imageName):$(imageTag) .
+          docker push $(acrName).azurecr.io/$(imageName):$(imageTag)
+
+- stage: DeploySecondary
+  displayName: 'Deploy to East Asia (standby)'
+  dependsOn: BuildAndPush
+  jobs:
+  - job: Deploy
+    displayName: 'Update East Asia app'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Update app and smoke test'
+      inputs:
+        azureSubscription: $(orgConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az containerapp update \
+            --name $(secondaryApp) \
+            --resource-group $(secondaryRg) \
+            --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
+            --set-env-vars REGION="East Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)" FRONTDOOR_ID="$(frontDoorId)"
+          FQDN=$(az containerapp show \
+            --name $(secondaryApp) \
+            --resource-group $(secondaryRg) \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          curl --fail --retry 10 --retry-delay 6 --retry-all-errors https://$FQDN/health
+
+- stage: DeployPrimary
+  displayName: 'Deploy to Southeast Asia (primary)'
+  dependsOn: DeploySecondary
+  jobs:
+  - job: Deploy
+    displayName: 'Update Southeast Asia app'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Update app and smoke test'
+      inputs:
+        azureSubscription: $(orgConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az containerapp update \
+            --name $(primaryApp) \
+            --resource-group $(primaryRg) \
+            --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
+            --set-env-vars REGION="Southeast Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)" FRONTDOOR_ID="$(frontDoorId)"
+          FQDN=$(az containerapp show \
+            --name $(primaryApp) \
+            --resource-group $(primaryRg) \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          curl --fail --retry 10 --retry-delay 6 --retry-all-errors https://$FQDN/health

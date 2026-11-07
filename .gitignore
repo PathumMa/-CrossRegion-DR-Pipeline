@@ -1,0 +1,42 @@
+## .NET build artifacts
+bin/
+obj/
+out/
+
+## Visual Studio / VS Code
+.vs/
+.vscode/
+*.user
+*.suo
+
+## Rider
+.idea/
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]uild/
+
+## NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+
+## Docker
+# (Dockerfile and .dockerignore ARE tracked — only local override files are excluded)
+docker-compose.override.yml
+
+## OS files
+.DS_Store
+Thumbs.db
+
+## Environment / secrets — never commit these
+.env
+*.pfx
+appsettings.Development.json
+appsettings.*.local.json
+
+## Logs
+*.log
