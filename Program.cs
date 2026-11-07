@@ -5,6 +5,33 @@ builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
+// Only accept traffic that came through our Azure Front Door profile.
+// Front Door adds the X-Azure-FDID header; /health is exempt so the pipeline
+// smoke test and Front Door's own health probe keep working.
+var frontDoorId = Environment.GetEnvironmentVariable("FRONTDOOR_ID");
+
+app.Use(async (context, next) =>
+{
+    // Local development: no Front Door in front, so skip the check.
+    if (app.Environment.IsDevelopment() || context.Request.Path == "/health")
+    {
+        await next();
+        return;
+    }
+
+    var incoming = context.Request.Headers["X-Azure-FDID"].ToString();
+
+    if (string.IsNullOrEmpty(frontDoorId) ||
+        !string.Equals(incoming, frontDoorId, StringComparison.OrdinalIgnoreCase))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsync("Forbidden");
+        return;
+    }
+
+    await next();
+});
+
 // Swagger only enabled in Development (set via ASPNETCORE_ENVIRONMENT) —
 // deliberately not exposed by default in Production, per project security notes.
 if (app.Environment.IsDevelopment())

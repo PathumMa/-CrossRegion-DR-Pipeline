@@ -25,6 +25,8 @@ variables:
   value: 'ca-demo-api-ea'
 - name: secondaryRg
   value: 'rg-docflo-demo-ea-01'
+- name: frontDoorId
+  value: '6bec47d5-d01c-4560-a1c1-74c7d32c68dd'
 
 stages:
 - stage: BuildAndPush
@@ -64,7 +66,7 @@ stages:
             --name $(secondaryApp) \
             --resource-group $(secondaryRg) \
             --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
-            --set-env-vars REGION="East Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)"
+            --set-env-vars REGION="East Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)" FRONTDOOR_ID="$(frontDoorId)"
           FQDN=$(az containerapp show \
             --name $(secondaryApp) \
             --resource-group $(secondaryRg) \
@@ -90,7 +92,7 @@ stages:
             --name $(primaryApp) \
             --resource-group $(primaryRg) \
             --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
-            --set-env-vars REGION="Southeast Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)"
+            --set-env-vars REGION="Southeast Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)" FRONTDOOR_ID="$(frontDoorId)"
           FQDN=$(az containerapp show \
             --name $(primaryApp) \
             --resource-group $(primaryRg) \
