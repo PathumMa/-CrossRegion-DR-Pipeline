@@ -30,13 +30,13 @@ variables:
 
 stages:
 - stage: BuildAndPush
-  displayName: 'Build and push image'
+  displayName: 'Build, scan and push image'
   jobs:
   - job: BuildPush
-    displayName: 'Build and push'
+    displayName: 'Build, scan and push'
     steps:
     - task: AzureCLI@2
-      displayName: 'Build and push image to ACR'
+      displayName: 'Build image'
       inputs:
         azureSubscription: 'azure-student-subscription'
         scriptType: 'bash'
@@ -45,7 +45,22 @@ stages:
           set -e
           az acr login --name $(acrName)
           docker build -t $(acrName).azurecr.io/$(imageName):$(imageTag) .
-          docker push $(acrName).azurecr.io/$(imageName):$(imageTag)
+
+    # Gate publication on high/critical vulnerabilities before the image is pushed.
+    - bash: |
+        set -e
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          aquasecurity/trivy:0.76.2 image \
+          --exit-code 1 \
+          --severity HIGH,CRITICAL \
+          $(acrName).azurecr.io/$(imageName):$(imageTag)
+      displayName: 'Scan image with Trivy'
+
+    - bash: |
+        set -e
+        docker push $(acrName).azurecr.io/$(imageName):$(imageTag)
+      displayName: 'Push image to ACR'
 
 - stage: DeploySecondary
   displayName: 'Deploy to East Asia (standby)'
