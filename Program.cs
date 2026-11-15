@@ -24,6 +24,10 @@ app.Use(async (context, next) =>
     if (string.IsNullOrEmpty(frontDoorId) ||
         !string.Equals(incoming, frontDoorId, StringComparison.OrdinalIgnoreCase))
     {
+        app.Logger.LogWarning(
+            "Blocked request without valid Front Door ID. Path={Path} Client={Client}",
+            context.Request.Path, context.Connection.RemoteIpAddress);
+
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         await context.Response.WriteAsync("Forbidden");
         return;
