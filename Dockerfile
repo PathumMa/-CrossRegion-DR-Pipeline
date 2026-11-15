@@ -17,7 +17,13 @@ WORKDIR /app
 # Run on plain HTTP inside the container; TLS is terminated upstream
 # (Azure Container Apps / Front Door), not inside the container itself.
 ENV ASPNETCORE_URLS=http://+:8080
+# Safe default. The pipeline also sets this on the Container App.
+ENV ASPNETCORE_ENVIRONMENT=Production
 EXPOSE 8080
 
 COPY --from=build /app/publish .
+
+# Do not run as root. The official .NET images include a non-root user.
+USER $APP_UID
+
 ENTRYPOINT ["dotnet", "DemoApi.dll"]

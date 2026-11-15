@@ -1,0 +1,11 @@
+bin/
+obj/
+.git/
+.vs/
+.vscode/
+*.user
+.env
+*.env
+azure-pipelines.yml
+Dockerfile
+README.md

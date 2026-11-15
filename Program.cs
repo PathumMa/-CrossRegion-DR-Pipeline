@@ -65,7 +65,7 @@ app.MapGet("/", () =>
         <body>
             <h1>Cross-Region DR &mdash; Demo Application</h1>
             <p>A demonstration API for showcasing cross-region deployments and service health.</p>
-            <p>Try the sample API: <a href="/weatherforecast">/weatherforecast</a> &nbsp;|&nbsp; Health details: <a href="/health">/health</a> &nbsp;|&nbsp; API docs: <a href="/swagger">/swagger</a></p>
+            <p>Try the sample API: <a href="/weatherforecast">/weatherforecast</a> &nbsp;|&nbsp; Health details: <a href="/health">/health</a> </p>
 
             <div class="meta">
                 <div><span class="label">Region:</span> __REGION__</div>
@@ -89,7 +89,6 @@ app.MapGet("/health", () => TypedResults.Ok(new
     status = "Healthy",
     region = Environment.GetEnvironmentVariable("REGION") ?? "Unknown region",
     version = Environment.GetEnvironmentVariable("APP_VERSION") ?? "local-dev",
-    commit = Environment.GetEnvironmentVariable("GIT_COMMIT") ?? "unknown",
     checkedAtUtc = DateTimeOffset.UtcNow
 }))
     .WithName("GetHealth")
