@@ -13,12 +13,14 @@ builder.Services.AddSwaggerGen();
 var app = builder.Build();
 
 // ---------- Front Door only ----------
+// Only accept traffic that came through our Azure Front Door profile.
+// Front Door adds the X-Azure-FDID header; /health is exempt so the pipeline
+// smoke test and Front Door's own health probe keep working.
 var frontDoorId = Environment.GetEnvironmentVariable("FRONTDOOR_ID");
 
 app.Use(async (context, next) =>
 {
     // Local development: no Front Door in front, so skip the check.
-    // /health stays open for the pipeline smoke test and Front Door probes.
     if (app.Environment.IsDevelopment() || context.Request.Path == "/health")
     {
         await next();
@@ -42,6 +44,8 @@ app.Use(async (context, next) =>
     await next();
 });
 
+// Swagger only enabled in Development (set via ASPNETCORE_ENVIRONMENT) -
+// deliberately not exposed by default in Production, per project security notes.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -113,6 +117,108 @@ async Task<SessionDoc?> GetSessionAsync(HttpContext ctx)
         s => s.TokenHash == hash && s.ExpiresAt > now,
         update,
         new FindOneAndUpdateOptions<SessionDoc> { ReturnDocument = ReturnDocument.Before });
+}
+
+// ---------- Page layout ----------
+const string BaseCss = """
+        :root{--bg:#F3F5F9;--surface:#fff;--ink:#172036;--muted:#566079;--line:#D9DEE8;--navy:#21295C;--sea:#0F8B8D;--ea:#5B5BD6;--fail:#D0382F;--fail-tint:#FDEDEC;--ok-tint:#E6F5F4}
+        *{box-sizing:border-box}
+        [hidden]{display:none !important}
+        body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+        .wrap{max-width:880px;margin:0 auto;padding:24px 20px 64px}
+        header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:28px}
+        .brand{font-weight:650;letter-spacing:-0.01em;color:var(--navy);text-decoration:none}
+        nav a{color:var(--muted);text-decoration:none;margin-left:18px;font-size:.95rem}
+        nav a:hover{color:var(--navy)}
+        nav a[aria-current]{color:var(--navy);font-weight:600;border-bottom:2px solid var(--navy);padding-bottom:2px}
+        h1{font-size:1.9rem;line-height:1.2;letter-spacing:-0.02em;margin:0 0 6px}
+        h2{font-size:1.05rem;margin:0 0 12px}
+        .lead{color:var(--muted);margin:0 0 24px;max-width:62ch}
+        .muted{color:var(--muted);font-size:.9rem}
+        .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-bottom:16px}
+        .hero{border-left:6px solid var(--line)}
+        .hero[data-region="Southeast Asia"]{border-left-color:var(--sea)}
+        .hero[data-region="East Asia"]{border-left-color:var(--ea)}
+        .big{font-size:2.2rem;font-weight:650;letter-spacing:-0.02em;margin:2px 0 12px}
+        .board{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+        .tile{background:var(--surface);border:1px solid var(--line);border-left:6px solid var(--line);border-radius:12px;padding:14px 18px}
+        .tile[data-region="Southeast Asia"]{border-left-color:var(--sea)}
+        .tile[data-region="East Asia"]{border-left-color:var(--ea)}
+        .tile[data-state="live"][data-region="Southeast Asia"]{background:var(--ok-tint)}
+        .tile[data-state="live"][data-region="East Asia"]{background:#EDEDFB}
+        .tile[data-state="down"]{background:var(--fail-tint);border-color:var(--fail)}
+        .tile .name{font-size:1.2rem;font-weight:650;letter-spacing:-0.01em}
+        .tile .role{color:var(--muted);font-size:.9rem}
+        .tile .state{margin-top:8px;font-size:.95rem}
+        .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#AEB6C7;margin-right:8px}
+        .tile[data-state="live"][data-region="Southeast Asia"] .dot{background:var(--sea)}
+        .tile[data-state="live"][data-region="East Asia"] .dot{background:var(--ea)}
+        .tile[data-state="down"] .dot{background:var(--fail)}
+        .banner{display:none;border-radius:10px;padding:12px 16px;margin-bottom:12px;font-weight:550}
+        .banner.show{display:block}
+        .banner.fail{background:var(--fail-tint);color:#8F211B}
+        .banner.ok{background:var(--ok-tint);color:#0B5557}
+        .strip{display:flex;justify-content:flex-end;gap:3px;height:34px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:6px 8px;overflow:hidden}
+        .bar{flex:0 0 6px;border-radius:2px;background:var(--line)}
+        .bar.sea{background:var(--sea)}.bar.ea{background:var(--ea)}.bar.fail{background:var(--fail)}
+        .legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:.85rem;margin:8px 2px 16px}
+        .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}
+        label{display:block;font-weight:600;font-size:.9rem;margin:12px 0 4px}
+        input[type=email],input[type=password]{width:100%;padding:10px 12px;border:1px solid #AEB6C7;border-radius:8px;font:inherit;background:#fff;color:var(--ink)}
+        button,.btn{display:inline-block;font:inherit;font-weight:600;padding:9px 16px;border-radius:8px;border:1px solid var(--navy);background:var(--navy);color:#fff;cursor:pointer;text-decoration:none}
+        button:hover,.btn:hover{filter:brightness(1.15)}
+        .secondary{background:#fff;color:var(--navy)}
+        .secondary:hover{background:#EEF0F8;filter:none}
+        .quiet{background:transparent;border-color:transparent;color:var(--muted);font-weight:500}
+        .quiet:hover{background:#EEF0F8;filter:none}
+        button:disabled{opacity:.5;cursor:not-allowed}
+        input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #8EA2FF;outline-offset:2px}
+        .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:16px}
+        .row.top{margin:0 0 12px}
+        .spacer{flex:1}
+        .switch{display:flex;align-items:center;gap:8px;margin:0;font-weight:500;color:var(--muted)}
+        .msg{min-height:1.4em;margin-top:10px;font-size:.92rem}
+        .msg.err{color:#A62A23}.msg.good{color:#0B6E70}
+        .facts{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;margin:8px 0 0}
+        .facts dt{color:var(--muted)}.facts dd{margin:0;font-weight:600}
+        .logbar{display:flex;justify-content:space-between;align-items:baseline}
+        .log{background:#0F1633;color:#DDE3F5;border-radius:10px;padding:12px 14px;font:12.5px/1.6 Consolas,"Cascadia Mono",monospace;height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+        .log:empty::before{content:attr(data-empty);color:#8190B8}
+        .log .f{color:#FF9B93}.log .n{color:#8AA0FF}
+        @media (max-width:640px){.board{grid-template-columns:1fr}.big{font-size:1.8rem}}
+        """;
+
+string Page(string title, string active, string main, string script = "")
+{
+    string Nav(string href, string label, string key) =>
+        "<a href=\"" + href + "\"" + (active == key ? " aria-current=\"page\"" : "") + ">" + label + "</a>";
+
+    return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>__TITLE__</title>
+        <style>__CSS__</style>
+        </head>
+        <body>
+        <div class="wrap">
+        <header>
+        <a class="brand" href="/">Cross-region DR demo</a>
+        <nav>__NAV__</nav>
+        </header>
+        __MAIN__
+        </div>
+        <script>__SCRIPT__</script>
+        </body>
+        </html>
+        """
+        .Replace("__TITLE__", title)
+        .Replace("__CSS__", BaseCss)
+        .Replace("__NAV__", Nav("/", "Home", "home") + Nav("/login", "Session demo", "session") + Nav("/health", "Health", "health"))
+        .Replace("__MAIN__", main)
+        .Replace("__SCRIPT__", script);
 }
 
 // ---------- Auth endpoints ----------
@@ -197,7 +303,8 @@ app.MapPost("/api/auth/logout", async (HttpContext ctx) =>
 app.MapGet("/api/me", async (HttpContext ctx) =>
 {
     var s = await GetSessionAsync(ctx);
-    if (s is null) return Results.Json(new { error = "Not signed in." }, statusCode: 401);
+    if (s is null)
+        return Results.Json(new { error = "Not signed in.", servedBy = Region() }, statusCode: 401);
 
     return Results.Ok(new
     {
@@ -228,133 +335,292 @@ app.MapGet("/health/db", async () =>
     }
 });
 
-// ---------- Login page ----------
+// ---------- Session demo page ----------
 app.MapGet("/login", () =>
 {
-    var html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <title>Sign in - Cross-Region DR Demo</title>
-            <style>
-                body { font-family: Segoe UI, Arial, sans-serif; background: #21295C; color: #fff; padding: 40px; }
-                .card { max-width: 640px; margin: 0 auto; background: rgba(255,255,255,0.06); border-radius: 8px; padding: 24px 30px; }
-                input { width: 100%; padding: 8px; margin: 6px 0 12px; border-radius: 4px; border: 0; box-sizing: border-box; }
-                button { padding: 8px 14px; margin: 4px 6px 4px 0; border: 0; border-radius: 4px; background: #7fd0e0; cursor: pointer; }
-                pre { background: #0f1433; padding: 12px; border-radius: 6px; max-height: 320px; overflow: auto; font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; }
-                a { color: #7fd0e0; }
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <h2>Session demo</h2>
-                <label>Email</label><input id="email" type="email" autocomplete="username">
-                <label>Password (min 8 characters)</label><input id="password" type="password" autocomplete="current-password">
-                <button id="register">Register</button>
-                <button id="login">Sign in</button>
-                <button id="me">Check session</button>
-                <button id="copy">Copy log</button>
-                <button id="logout">Sign out</button>
-                <div><label><input id="poll" type="checkbox" style="width:auto"> Check session every 2 seconds</label></div>
-                <pre id="out">Log appears here...</pre>
-                <a href="/">Back to home</a>
+    var main = """
+        <h1>Session demo</h1>
+        <p class="lead">Sign in, turn on auto-check, then stop the primary region. Your session should carry on from the other region.</p>
+
+        <div id="banner" class="banner" role="status" aria-live="polite"></div>
+
+        <div class="board">
+            <div class="tile" data-region="Southeast Asia" data-state="idle">
+                <div class="name">Southeast Asia</div><div class="role">Primary</div>
+                <div class="state"><span class="dot"></span><span class="state-text">Waiting for a request</span></div>
             </div>
-            <script>
-                const out = document.getElementById('out');
-                const lines = [];
-                function show(status, data) {
-                    let text;
-                    if (data && data.thisRequestServedBy) {
-                        text = 'created=' + data.sessionCreatedInRegion + ' | previous=' + data.previousRequestServedBy + ' | now=' + data.thisRequestServedBy;
-                    } else {
-                        text = JSON.stringify(data);
-                    }
-                    lines.unshift(new Date().toISOString().slice(11, 23) + '  ' + status + '  ' + text);
-                    if (lines.length > 200) lines.pop();
-                    out.textContent = lines.slice(0, 40).join('\n');
-                }
-                async function call(method, url, body) {
-                    try {
-                        const r = await fetch(url, {
-                            method: method,
-                            headers: { 'Content-Type': 'application/json' },
-                            body: body ? JSON.stringify(body) : undefined,
-                            credentials: 'same-origin',
-                            signal: AbortSignal.timeout(5000)
-                        });
-                        const text = await r.text();
-                        let data;
-                        try { data = JSON.parse(text); } catch (e) { data = text.slice(0, 120); }
-                        show(r.status, data);
-                    } catch (e) {
-                        show('FAILED', String(e).slice(0, 80));
-                    }
-                }
-                function creds() {
-                    return { email: document.getElementById('email').value, password: document.getElementById('password').value };
-                }
-                document.getElementById('register').onclick = () => call('POST', '/api/auth/register', creds());
-                document.getElementById('login').onclick = () => call('POST', '/api/auth/login', creds());
-                document.getElementById('me').onclick = () => call('GET', '/api/me');
-                document.getElementById('logout').onclick = () => call('POST', '/api/auth/logout');
-                document.getElementById('copy').onclick = () => navigator.clipboard.writeText(lines.slice().reverse().join('\n'));
-                let timer = null;
-                document.getElementById('poll').onchange = (e) => {
-                    if (e.target.checked) { timer = setInterval(() => call('GET', '/api/me'), 2000); }
-                    else { clearInterval(timer); }
-                };
-            </script>
-        </body>
-        </html>
+            <div class="tile" data-region="East Asia" data-state="idle">
+                <div class="name">East Asia</div><div class="role">Failover</div>
+                <div class="state"><span class="dot"></span><span class="state-text">Waiting for a request</span></div>
+            </div>
+        </div>
+        <div id="strip" class="strip" aria-hidden="true"></div>
+        <div class="legend">
+            <span><i style="background:var(--sea)"></i>Southeast Asia</span>
+            <span><i style="background:var(--ea)"></i>East Asia</span>
+            <span><i style="background:var(--fail)"></i>No response</span>
+            <span>Newest request on the right</span>
+        </div>
+
+        <section class="card">
+            <div id="signedOut">
+                <h2>Sign in</h2>
+                <form id="authForm" novalidate>
+                    <label for="email">Email</label>
+                    <input id="email" type="email" autocomplete="username" placeholder="demo.user@example.com">
+                    <label for="password">Password</label>
+                    <input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters">
+                    <div class="row">
+                        <button type="submit" id="login">Sign in</button>
+                        <button type="button" id="register" class="secondary">Create account</button>
+                    </div>
+                    <div id="msg" class="msg" role="status"></div>
+                </form>
+            </div>
+            <div id="signedIn" hidden>
+                <h2>Signed in as <span id="who"></span></h2>
+                <dl class="facts">
+                    <dt>Session created in</dt><dd id="f-created"></dd>
+                    <dt>Previous request served by</dt><dd id="f-prev"></dd>
+                    <dt>This request served by</dt><dd id="f-now"></dd>
+                </dl>
+                <div class="row"><button type="button" id="logout" class="secondary">Sign out</button></div>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="logbar"><h2>Request log</h2><span class="muted">Times are UTC</span></div>
+            <div class="row top">
+                <label class="switch"><input type="checkbox" id="poll"> Check session every 2 seconds</label>
+                <button type="button" id="check" class="secondary">Check now</button>
+                <span class="spacer"></span>
+                <button type="button" id="copy" class="quiet">Copy log</button>
+                <button type="button" id="clear" class="quiet" title="Clears the log, the request strip and the banner">Clear log</button>
+            </div>
+            <div id="log" class="log" data-empty="No requests yet. Sign in, then turn on auto-check."></div>
+        </section>
         """;
-    return Results.Content(html, "text/html");
+
+    var script = """
+        (function () {
+            const REGIONS = ['Southeast Asia', 'East Asia'];
+            const MAX_BARS = 80, MAX_LOG = 500;
+            const $ = (id) => document.getElementById(id);
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const strip = $('strip'), logEl = $('log'), banner = $('banner');
+            let lines = [], lastRegion = null, failing = false, failStart = 0, polling = false, loopId = 0;
+
+            const stamp = (d) => d.toISOString().slice(11, 23);
+            const regionClass = (r) => r === 'Southeast Asia' ? 'sea' : (r === 'East Asia' ? 'ea' : 'other');
+
+            function addLog(text, cls) {
+                const t = stamp(new Date());
+                lines.push(t + '  ' + text);
+                if (lines.length > MAX_LOG) lines.shift();
+                const div = document.createElement('div');
+                if (cls) div.className = cls;
+                div.textContent = t + '  ' + text;
+                logEl.appendChild(div);
+                while (logEl.childNodes.length > 200) logEl.removeChild(logEl.firstChild);
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+            function addBar(cls, title) {
+                const b = document.createElement('div');
+                b.className = 'bar ' + cls;
+                b.title = title;
+                strip.appendChild(b);
+                while (strip.childNodes.length > MAX_BARS) strip.removeChild(strip.firstChild);
+            }
+            function setBoard() {
+                REGIONS.forEach((r) => {
+                    const tile = document.querySelector('.tile[data-region="' + r + '"]');
+                    let state = 'idle', label = 'Waiting for a request';
+                    if (lastRegion === r) {
+                        state = failing ? 'down' : 'live';
+                        label = failing ? 'Not responding' : 'Serving your requests';
+                    } else if (lastRegion) {
+                        state = 'standby';
+                        label = 'Not in use';
+                    }
+                    tile.dataset.state = state;
+                    tile.querySelector('.state-text').textContent = label;
+                });
+            }
+            function showBanner(kind, text) { banner.className = 'banner show ' + kind; banner.textContent = text; }
+
+            function onSuccess(region) {
+                if (failing) {
+                    const secs = ((Date.now() - failStart) / 1000).toFixed(1);
+                    const where = region || 'a healthy region';
+                    failing = false;
+                    showBanner('ok', 'Recovered. ' + where + ' is serving requests. Outage lasted ' + secs + ' s.');
+                    addLog('RECOVERED after ' + secs + ' s (' + where + ')', 'n');
+                }
+                if (region) lastRegion = region;
+                addBar(regionClass(region), region || 'Responded');
+                setBoard();
+            }
+            function onFailure(startedAt, detail) {
+                if (!failing) {
+                    failing = true;
+                    failStart = startedAt;
+                    showBanner('fail', 'No response since ' + stamp(new Date(startedAt)) + ' UTC. Waiting for a healthy region.');
+                }
+                addBar('fail', detail);
+                setBoard();
+            }
+
+            function renderAccount(d) {
+                $('signedOut').hidden = !!d;
+                $('signedIn').hidden = !d;
+                if (d) {
+                    $('who').textContent = d.email;
+                    $('f-created').textContent = d.sessionCreatedInRegion;
+                    $('f-prev').textContent = d.previousRequestServedBy;
+                    $('f-now').textContent = d.thisRequestServedBy;
+                }
+            }
+
+            async function check() {
+                const started = Date.now();
+                try {
+                    const r = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+                    const text = await r.text();
+                    let data = null;
+                    try { data = JSON.parse(text); } catch (e) {}
+                    if (r.status === 200 && data) {
+                        renderAccount(data);
+                        addLog('200  created=' + data.sessionCreatedInRegion + ' | previous=' + data.previousRequestServedBy + ' | now=' + data.thisRequestServedBy);
+                        onSuccess(data.thisRequestServedBy);
+                    } else if (r.status === 401 && data) {
+                        renderAccount(null);
+                        addLog('401  not signed in' + (data.servedBy ? ' (' + data.servedBy + ')' : ''));
+                        onSuccess(data.servedBy || null);
+                    } else {
+                        addLog(r.status + '  region unavailable', 'f');
+                        onFailure(started, 'HTTP ' + r.status);
+                    }
+                } catch (e) {
+                    addLog('FAILED  no response (' + (e.name === 'TimeoutError' ? 'timed out after 5 s' : 'network error') + ')', 'f');
+                    onFailure(started, 'No response');
+                }
+            }
+
+            async function post(url, body) {
+                const r = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: body ? JSON.stringify(body) : undefined,
+                    credentials: 'same-origin',
+                    signal: AbortSignal.timeout(8000)
+                });
+                let data = {};
+                try { data = await r.json(); } catch (e) {}
+                return { status: r.status, data: data };
+            }
+
+            const creds = () => ({ email: $('email').value.trim(), password: $('password').value });
+            function setMsg(kind, text) { const m = $('msg'); m.className = 'msg ' + kind; m.textContent = text; }
+            function validate(forRegister) {
+                const c = creds();
+                if (!c.email || c.email.indexOf('@') < 1) { setMsg('err', 'Enter a valid email address.'); return false; }
+                if (forRegister && c.password.length < 8) { setMsg('err', 'Use a password with at least 8 characters.'); return false; }
+                if (!c.password) { setMsg('err', 'Enter your password.'); return false; }
+                return true;
+            }
+            function busy(on) { ['login', 'register', 'logout', 'check'].forEach((id) => { $(id).disabled = on; }); }
+            async function run(fn) {
+                busy(true);
+                try { await fn(); }
+                catch (e) {
+                    setMsg('err', 'No response from the server. Try again in a moment.');
+                    addLog('FAILED  ' + (e.name === 'TimeoutError' ? 'request timed out' : 'network error'), 'f');
+                }
+                busy(false);
+            }
+
+            async function login() {
+                const res = await post('/api/auth/login', creds());
+                if (res.status === 200) {
+                    addLog('200  signed in via ' + res.data.region);
+                    $('password').value = '';
+                    setMsg('', '');
+                    await check();
+                } else {
+                    setMsg('err', res.data.error || 'Could not sign in.');
+                    addLog(res.status + '  ' + (res.data.error || 'sign-in failed'), 'f');
+                }
+            }
+
+            $('authForm').onsubmit = (e) => { e.preventDefault(); setMsg('', ''); run(async () => { if (validate(false)) await login(); }); };
+            $('register').onclick = () => {
+                setMsg('', '');
+                run(async () => {
+                    if (!validate(true)) return;
+                    const res = await post('/api/auth/register', creds());
+                    if (res.status === 200) { addLog('200  account created'); await login(); }
+                    else { setMsg('err', res.data.error || 'Could not create the account.'); addLog(res.status + '  ' + (res.data.error || 'register failed'), 'f'); }
+                });
+            };
+            $('logout').onclick = () => run(async () => {
+                const res = await post('/api/auth/logout');
+                addLog(res.status + '  signed out');
+                await check();
+                setMsg('good', 'You signed out.');
+            });
+            $('check').onclick = () => run(check);
+
+            async function loop(id) { while (polling && id === loopId) { await check(); await sleep(2000); } }
+            $('poll').onchange = (e) => { loopId++; polling = e.target.checked; if (polling) loop(loopId); };
+
+            $('copy').onclick = async () => {
+                try { await navigator.clipboard.writeText(lines.join('\n')); $('copy').textContent = 'Copied'; }
+                catch (e) { $('copy').textContent = 'Copy failed'; }
+                setTimeout(() => { $('copy').textContent = 'Copy log'; }, 1500);
+            };
+            $('clear').onclick = () => {
+                lines = []; logEl.textContent = ''; strip.textContent = '';
+                banner.className = 'banner'; banner.textContent = '';
+                failing = false; lastRegion = null; setBoard();
+            };
+
+            check();
+        })();
+        """;
+
+    return Results.Content(Page("Session demo", "session", main, script), "text/html");
 });
 
 // ---------- Home page ----------
 app.MapGet("/", () =>
 {
-    var region = Environment.GetEnvironmentVariable("REGION") ?? "Unknown region";
-    var version = Environment.GetEnvironmentVariable("APP_VERSION") ?? "local-dev";
-    var now = DateTime.UtcNow;
+    var region = System.Net.WebUtility.HtmlEncode(Environment.GetEnvironmentVariable("REGION") ?? "Unknown region");
+    var version = System.Net.WebUtility.HtmlEncode(Environment.GetEnvironmentVariable("APP_VERSION") ?? "local-dev");
 
-    var html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Welcome - Cross-Region DR Pipeline - Demo App</title>
-            <style>
-                body { font-family: Segoe UI, Arial, sans-serif; background: #21295C; color: #fff; text-align: center; padding-top: 60px; }
-                h1 { font-size: 2rem; }
-                p { color: #9ab; }
-                a { color: #7fd0e0; }
-                .meta { margin-top: 40px; display: inline-block; text-align: left; background: rgba(255,255,255,0.06); border-radius: 8px; padding: 20px 30px; }
-                .meta div { margin: 6px 0; font-size: 0.95rem; }
-                .label { color: #7fd0e0; font-weight: 600; display: inline-block; width: 110px; }
-            </style>
-        </head>
-        <body>
-            <h1>Cross-Region DR &mdash; Demo Application</h1>
-            <p>A demonstration API for showcasing cross-region deployments and service health.</p>
-            <p>Try: <a href="/login">/login</a> &nbsp;|&nbsp; <a href="/weatherforecast">/weatherforecast</a> &nbsp;|&nbsp; Health details: <a href="/health">/health</a></p>
-
-            <div class="meta">
-                <div><span class="label">Region:</span> __REGION__</div>
-                <div><span class="label">Version:</span> __VERSION__</div>
-                <div><span class="label">Server time (UTC):</span> __TIME__</div>
+    var main = """
+        <h1>Cross-region disaster recovery demo</h1>
+        <p class="lead">Two copies of this app run in different Azure regions behind Azure Front Door. If one region stops responding, traffic moves to the other and your session stays signed in.</p>
+        <section class="card hero" data-region="__REGION__">
+            <div class="muted">This page was served from</div>
+            <div class="big">__REGION__</div>
+            <dl class="facts">
+                <dt>Version</dt><dd>__VERSION__</dd>
+                <dt>Server time (UTC)</dt><dd>__TIME__</dd>
+            </dl>
+            <div class="row">
+                <a class="btn" href="/login">Open session demo</a>
+                <a class="btn secondary" href="/weatherforecast">Sample API</a>
             </div>
-        </body>
-        </html>
-        """;
-
-    html = html
+        </section>
+        """
         .Replace("__REGION__", region)
         .Replace("__VERSION__", version)
-        .Replace("__TIME__", now.ToString("yyyy-MM-dd HH:mm:ss"));
+        .Replace("__TIME__", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
 
-    return Results.Content(html, "text/html");
+    return Results.Content(Page("Cross-region DR demo", "home", main), "text/html");
 });
 
+// ---------- Health ----------
 app.MapGet("/health", () => TypedResults.Ok(new
 {
     status = "Healthy",
@@ -368,7 +634,7 @@ app.MapGet("/health", () => TypedResults.Ok(new
     .WithDescription("Returns the application health status and deployment metadata.")
     .Produces(StatusCodes.Status200OK);
 
-// Sample API endpoint (kept from the default template)
+// ---------- Sample API endpoint (kept from the default template) ----------
 var summaries = new[]
 {
     "Freezing", "Bracing", "Chilly", "Cool", "Mild",
@@ -391,6 +657,7 @@ app.MapGet("/weatherforecast", () =>
 
 app.Run();
 
+// ---------- Types ----------
 record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 {
     public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
