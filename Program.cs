@@ -242,7 +242,7 @@ app.MapGet("/login", () =>
                 .card { max-width: 640px; margin: 0 auto; background: rgba(255,255,255,0.06); border-radius: 8px; padding: 24px 30px; }
                 input { width: 100%; padding: 8px; margin: 6px 0 12px; border-radius: 4px; border: 0; box-sizing: border-box; }
                 button { padding: 8px 14px; margin: 4px 6px 4px 0; border: 0; border-radius: 4px; background: #7fd0e0; cursor: pointer; }
-                pre { background: #0f1433; padding: 12px; border-radius: 6px; max-height: 320px; overflow: auto; font-size: 0.8rem; }
+                pre { background: #0f1433; padding: 12px; border-radius: 6px; max-height: 320px; overflow: auto; font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; }
                 a { color: #7fd0e0; }
             </style>
         </head>
@@ -254,6 +254,7 @@ app.MapGet("/login", () =>
                 <button id="register">Register</button>
                 <button id="login">Sign in</button>
                 <button id="me">Check session</button>
+                <button id="copy">Copy log</button>
                 <button id="logout">Sign out</button>
                 <div><label><input id="poll" type="checkbox" style="width:auto"> Check session every 2 seconds</label></div>
                 <pre id="out">Log appears here...</pre>
@@ -263,9 +264,15 @@ app.MapGet("/login", () =>
                 const out = document.getElementById('out');
                 const lines = [];
                 function show(status, data) {
-                    lines.unshift(new Date().toISOString() + '  HTTP ' + status + '  ' + JSON.stringify(data));
-                    if (lines.length > 15) lines.pop();
-                    out.textContent = lines.join('\n');
+                    let text;
+                    if (data && data.thisRequestServedBy) {
+                        text = 'created=' + data.sessionCreatedInRegion + ' | previous=' + data.previousRequestServedBy + ' | now=' + data.thisRequestServedBy;
+                    } else {
+                        text = JSON.stringify(data);
+                    }
+                    lines.unshift(new Date().toISOString().slice(11, 23) + '  ' + status + '  ' + text);
+                    if (lines.length > 200) lines.pop();
+                    out.textContent = lines.slice(0, 40).join('\n');
                 }
                 async function call(method, url, body) {
                     try {
@@ -273,14 +280,15 @@ app.MapGet("/login", () =>
                             method: method,
                             headers: { 'Content-Type': 'application/json' },
                             body: body ? JSON.stringify(body) : undefined,
-                            credentials: 'same-origin'
+                            credentials: 'same-origin',
+                            signal: AbortSignal.timeout(5000)
                         });
                         const text = await r.text();
                         let data;
                         try { data = JSON.parse(text); } catch (e) { data = text.slice(0, 120); }
                         show(r.status, data);
                     } catch (e) {
-                        show('network error', String(e));
+                        show('FAILED', String(e).slice(0, 80));
                     }
                 }
                 function creds() {
@@ -290,6 +298,7 @@ app.MapGet("/login", () =>
                 document.getElementById('login').onclick = () => call('POST', '/api/auth/login', creds());
                 document.getElementById('me').onclick = () => call('GET', '/api/me');
                 document.getElementById('logout').onclick = () => call('POST', '/api/auth/logout');
+                document.getElementById('copy').onclick = () => navigator.clipboard.writeText(lines.slice().reverse().join('\n'));
                 let timer = null;
                 document.getElementById('poll').onchange = (e) => {
                     if (e.target.checked) { timer = setInterval(() => call('GET', '/api/me'), 2000); }
