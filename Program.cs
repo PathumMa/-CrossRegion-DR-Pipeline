@@ -455,6 +455,9 @@ app.MapGet("/login", () =>
                     failing = false;
                     showBanner('ok', 'Recovered. ' + where + ' is serving requests. Outage lasted ' + secs + ' s.');
                     addLog('RECOVERED after ' + secs + ' s (' + where + ')', 'n');
+                } else if (region && lastRegion && region !== lastRegion) {
+                    showBanner('ok', 'Traffic moved back to ' + region + '.');
+                    addLog('SWITCHED to ' + region, 'n');
                 }
                 if (region) lastRegion = region;
                 addBar(regionClass(region), region || 'Responded');
