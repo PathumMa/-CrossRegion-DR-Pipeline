@@ -81,7 +81,7 @@ stages:
             --name $(secondaryApp) \
             --resource-group $(secondaryRg) \
             --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
-            --set-env-vars REGION="East Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)" FRONTDOOR_ID="$(frontDoorId)"
+            --set-env-vars REGION="East Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)" FRONTDOOR_ID="$(frontDoorId)" ASPNETCORE_ENVIRONMENT="Production" MONGODB_URI=secretref:mongodb-uri MONGODB_DB="demoapp"
           FQDN=$(az containerapp show \
             --name $(secondaryApp) \
             --resource-group $(secondaryRg) \
@@ -107,7 +107,7 @@ stages:
             --name $(primaryApp) \
             --resource-group $(primaryRg) \
             --image $(acrName).azurecr.io/$(imageName):$(imageTag) \
-            --set-env-vars REGION="Southeast Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)" FRONTDOOR_ID="$(frontDoorId)"
+            --set-env-vars REGION="Southeast Asia" APP_VERSION="$(imageTag)" GIT_COMMIT="$(Build.SourceVersion)" FRONTDOOR_ID="$(frontDoorId)" ASPNETCORE_ENVIRONMENT="Production" MONGODB_URI=secretref:mongodb-uri MONGODB_DB="demoapp"
           FQDN=$(az containerapp show \
             --name $(primaryApp) \
             --resource-group $(primaryRg) \
