@@ -1,0 +1,65 @@
+# DR drill pipeline (manual only).
+# Stops the primary Container App on purpose, measures failover and failback through
+# Azure Front Door, restarts the primary, and publishes the results as an artifact.
+# Do not run it while the main deployment pipeline is running.
+
+name: 'drill-$(Date:yyyyMMdd)-$(Rev:r)'
+
+trigger: none
+
+parameters:
+- name: iterations
+  displayName: 'Drill iterations (each takes about 4 to 5 minutes)'
+  type: number
+  default: 5
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- name: orgConnection
+  value: 'azure-org-subscription'
+- name: primaryApp
+  value: 'ca-demo-api-sea'
+- name: primaryRg
+  value: 'rg-docflo-demo-sea-01'
+- name: primaryRegion
+  value: 'Southeast Asia'
+- name: standbyRegion
+  value: 'East Asia'
+- name: frontDoorHost
+  value: 'demo-dr-g3fhd3cpd5f5dqeg.a01.azurefd.net'
+- name: acaApiVersion
+  value: '2026-01-01'
+- name: drillEmail
+  value: 'drill.user@example.com'
+# drillPassword is NOT in this file. Create it as a secret variable in the pipeline settings.
+
+steps:
+- task: AzureCLI@2
+  displayName: 'Run DR drill'
+  timeoutInMinutes: 55
+  env:
+    ITERATIONS: ${{ parameters.iterations }}
+    HOST: $(frontDoorHost)
+    PRIMARY_APP: $(primaryApp)
+    PRIMARY_RG: $(primaryRg)
+    PRIMARY_REGION: $(primaryRegion)
+    STANDBY_REGION: $(standbyRegion)
+    API_VERSION: $(acaApiVersion)
+    DRILL_EMAIL: $(drillEmail)
+    DRILL_PASSWORD: $(drillPassword)
+    OUT_DIR: $(Build.SourcesDirectory)/drill-output
+  inputs:
+    azureSubscription: $(orgConnection)
+    scriptType: 'bash'
+    scriptLocation: 'scriptPath'
+    scriptPath: '$(Build.SourcesDirectory)/scripts/dr-drill.sh'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish drill results'
+  condition: always()
+  inputs:
+    targetPath: '$(Build.SourcesDirectory)/drill-output'
+    artifact: 'drill-results'

@@ -29,8 +29,23 @@ variables:
   value: '6bec47d5-d01c-4560-a1c1-74c7d32c68dd'
 
 stages:
+- stage: Test
+  displayName: 'Test application'
+  jobs:
+  - job: RunTests
+    displayName: 'Run automated tests'
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK'
+      inputs:
+        packageType: 'sdk'
+        version: '10.0.x'
+    - script: dotnet test tests/DemoApi.Tests/DemoApi.Tests.csproj --configuration Release
+      displayName: 'Run .NET tests'
+
 - stage: BuildAndPush
   displayName: 'Build, scan and push image'
+  dependsOn: Test
   jobs:
   - job: BuildPush
     displayName: 'Build, scan and push'
