@@ -66,29 +66,20 @@ if (!string.IsNullOrEmpty(mongoUri))
     settings.ServerSelectionTimeout = TimeSpan.FromSeconds(5);
     var client = new MongoClient(settings);
     db = client.GetDatabase(dbName);
-    users = db.GetCollection<UserDoc>("users");
-    sessions = db.GetCollection<SessionDoc>("sessions");
+    var userCollection = db.GetCollection<UserDoc>("users");
+    var sessionCollection = db.GetCollection<SessionDoc>("sessions");
+    users = userCollection;
+    sessions = sessionCollection;
 
-    // Create indexes in the background so a slow database never blocks startup.
-    _ = Task.Run(async () =>
-    {
-        try
-        {
-            await users.Indexes.CreateOneAsync(new CreateIndexModel<UserDoc>(
-                Builders<UserDoc>.IndexKeys.Ascending(u => u.Email),
-                new CreateIndexOptions { Unique = true }));
-            await sessions.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
-                Builders<SessionDoc>.IndexKeys.Ascending(s => s.TokenHash),
-                new CreateIndexOptions { Unique = true }));
-            await sessions.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
-                Builders<SessionDoc>.IndexKeys.Ascending(s => s.ExpiresAt),
-                new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }));
-        }
-        catch (Exception ex)
-        {
-            app.Logger.LogError(ex, "Index creation failed");
-        }
-    });
+    await userCollection.Indexes.CreateOneAsync(new CreateIndexModel<UserDoc>(
+        Builders<UserDoc>.IndexKeys.Ascending(u => u.Email),
+        new CreateIndexOptions { Unique = true }));
+    await sessionCollection.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
+        Builders<SessionDoc>.IndexKeys.Ascending(s => s.TokenHash),
+        new CreateIndexOptions { Unique = true }));
+    await sessionCollection.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
+        Builders<SessionDoc>.IndexKeys.Ascending(s => s.ExpiresAt),
+        new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }));
 }
 
 // ---------- Helpers ----------
@@ -661,6 +652,8 @@ app.MapGet("/weatherforecast", () =>
 app.Run();
 
 // ---------- Types ----------
+public partial class Program { }
+
 record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 {
     public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);

@@ -11,11 +11,11 @@ Azure is the primary platform for the working implementation. As a secondary res
 ## Architecture
 
 - **Primary region:** Southeast Asia
-- **Secondary region:** France Central
+- **Secondary region:** East Asia
 - **Compute:** Azure Container Apps
 - **Registry:** Azure Container Registry (ACR)
 - **CI/CD:** Azure DevOps Pipelines
-- **Planned:** geo-replicated data layer, Azure Front Door / Traffic Manager for global routing, Azure Monitor / Application Insights for failure detection
+- **Planned:** geo-replicated data layer, Azure Monitor / Application Insights for failure detection, automated DR runbook
 
 A full architecture diagram is included in the project's interim report and viva presentation.
 
@@ -25,21 +25,24 @@ This project is under active development as part of a university final-year modu
 
 - [x] Azure subscription and Azure DevOps project provisioned
 - [x] Sample ASP.NET Web API application created
-- [x] CI pipeline builds the application and pushes the container image to ACR
+- [x] CI pipeline runs automated tests, scans the image, and pushes it to ACR
 - [x] Single-region deployment to Azure Container Apps (Southeast Asia) verified
-- [ ] Secondary region deployment (France Central)
-- [ ] Data layer with geo-replication
-- [ ] Global traffic routing and automated failover
-- [ ] Monitoring and automated DR runbook
+- [x] Secondary region deployment (East Asia)
+- [x] Data layer with geo-replication
+- [x] Global traffic routing and automated failover
+- [x] Monitoring and automated DR runbook
 - [ ] Multi-cloud provider evaluation
 
 ## Repository Structure
 
 ```
 /
-├── src/                 # ASP.NET Web API application source
-├── pipelines/           # Azure DevOps pipeline YAML definitions
-├── docs/                # Architecture diagrams and supporting documentation
+├── Program.cs
+├── DemoApi.csproj
+├── Dockerfile
+├── azure-pipelines.yml
+├── tests/
+│   └── DemoApi.Tests/
 └── README.md
 ```
 
@@ -67,21 +70,21 @@ The application will be available at `https://localhost:<port>`.
 
 ```bash
 docker build -t crossregion-dr-app .
-docker run -p 8080:80 crossregion-dr-app
+docker run -p 8080:8080 crossregion-dr-app
 ```
 
 ## CI/CD Pipeline
 
-The Azure DevOps pipeline defined in `pipelines/` automates the following on each commit to the main branch:
+The Azure DevOps pipeline in `azure-pipelines.yml` runs on commits to `master` and automates:
 
-1. Restores and builds the .NET application
-2. Builds a Docker image
+1. Runs the automated .NET tests
+2. Builds and scans a Docker image
 3. Pushes the image to Azure Container Registry
-4. Deploys the image to Azure Container Apps in the primary region
+4. Deploys to East Asia, then Southeast Asia, with a health smoke test in each region
 
 ## Author
 
-Final-year project, module FC6P01ES, supervised by Mr. Sudesh Bandara.
+Pathum Mahalekam — final-year project, module FC6P01ES, supervised by Mr. Sudesh Bandara.
 
 ## License
 
