@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# DR drill (fault injection): repeatedly stop the primary Container App, measure how long
-# Azure Front Door takes to serve users from the standby region, then restart the primary
-# and measure failback. Also records DNS, TCP, TLS and time-to-first-byte for every probe.
+# DR drill (fault injection): repeatedly stop the primary Container App, measure failover and
+# failback through Azure Front Door, and verify that acknowledged writes survive the failover.
+# Also records DNS, TCP, TLS and time-to-first-byte for every availability probe.
 #
 # Requires: az (logged in by the AzureCLI@2 task), curl, jq, python3, awk (all present on ubuntu-latest).
 
@@ -24,10 +24,15 @@ BASE="/subscriptions/$SUB/resourceGroups/$PRIMARY_RG/providers/Microsoft.App/con
 JAR=$(mktemp)
 STOPPED=0
 ITER=0
+RPO_PID=""
+RPO_STOP_FILE=""
+RPO_RUN_ID=""
 mkdir -p "$OUT"
 
 echo "iteration,epoch,http_code,region,session_created_in,dns_s,tcp_s,tls_s,ttfb_s,total_s" > "$OUT/probes.csv"
 echo "iteration,outage_s,failover_from_stop_s,failed_probes,session_survived,failback_s,failback_errors,status" > "$OUT/results.csv"
+echo "iteration,run_id,seq,epoch,http_code,region" > "$OUT/rpo-writes.csv"
+echo "iteration,run_id,writes_attempted,writes_acknowledged,writes_failed,acknowledged_found,acknowledged_missing,unacknowledged_stored,loss_span_s,verification_status" > "$OUT/rpo-results.csv"
 
 now()        { date +%s.%N; }
 elapsed_gt() { awk -v a="$(now)" -v b="$1" -v l="$2" 'BEGIN{exit !(a-b>l)}'; }
@@ -77,6 +82,9 @@ start_primary() { lifecycle start; }
 
 # Safety net: never leave the primary stopped if the script exits early or is cancelled.
 cleanup() {
+  if [ -n "$RPO_PID" ]; then
+    stop_rpo_writer
+  fi
   if [ "$STOPPED" = "1" ]; then
     echo "Cleanup: starting the primary app again"
     start_primary || echo "WARNING: could not start the primary app. Start it manually in the portal."
@@ -125,8 +133,119 @@ login() {
        -H 'Content-Type: application/json' -d "$payload" || true
 }
 
+RPO_FAILURES=0
 FAILURES=0
 record_fail() { FAILURES=$((FAILURES + 1)); echo "$ITER,,,,,,,$1" >> "$OUT/results.csv"; echo "Iteration $ITER FAILED: $1"; }
+
+rpo_write_one() {
+  local iteration="$1" run_id="$2" seq="$3" body payload code region epoch
+  body=$(mktemp)
+  payload=$(jq -cn --arg runId "$run_id" --argjson seq "$seq" '{runId:$run_id,seq:$seq}')
+  code=$(curl -s -o "$body" -b "$JAR" --max-time 5 -w '%{http_code}' \
+      -X POST "$URL/api/records" -H 'Content-Type: application/json' -d "$payload" 2>/dev/null) || true
+  [ -n "$code" ] || code="000"
+  region=$(jq -r '.region // empty' "$body" 2>/dev/null || true)
+  epoch=$(now)
+  printf '%s,%s,%s,%s,%s,%s\n' "$iteration" "$run_id" "$seq" "$epoch" "$code" "$region" >> "$OUT/rpo-writes.csv"
+  rm -f "$body"
+}
+
+rpo_writer() {
+  local iteration="$1" run_id="$2" stop_file="$3" seq=0 pid
+  local -a pending=()
+  while [ ! -e "$stop_file" ]; do
+    seq=$((seq + 1))
+    rpo_write_one "$iteration" "$run_id" "$seq" &
+    pending+=("$!")
+    sleep 1
+  done
+  for pid in "${pending[@]}"; do
+    wait "$pid" || echo "Warning: RPO write request $pid exited unexpectedly"
+  done
+}
+
+start_rpo_writer() {
+  RPO_RUN_ID="drill-${ITER}-$(date +%s)-${RANDOM}"
+  RPO_STOP_FILE="$OUT/.rpo-stop-${ITER}"
+  rm -f "$RPO_STOP_FILE"
+  rpo_writer "$ITER" "$RPO_RUN_ID" "$RPO_STOP_FILE" &
+  RPO_PID=$!
+  echo "Started RPO writer (run $RPO_RUN_ID), one request per second."
+}
+
+stop_rpo_writer() {
+  if [ -n "$RPO_PID" ]; then
+    : > "$RPO_STOP_FILE"
+    if ! wait "$RPO_PID"; then
+      echo "Warning: RPO writer exited unexpectedly."
+    fi
+    RPO_PID=""
+    rm -f "$RPO_STOP_FILE"
+  fi
+}
+
+verify_rpo() {
+  local body code stats
+  local attempted acknowledged failed
+
+  attempted=$(awk -F, -v i="$ITER" -v r="$RPO_RUN_ID" \
+    'NR > 1 && $1 == i && $2 == r { n++ } END { print n + 0 }' "$OUT/rpo-writes.csv")
+  acknowledged=$(awk -F, -v i="$ITER" -v r="$RPO_RUN_ID" \
+    'NR > 1 && $1 == i && $2 == r && $5 == "200" { n++ } END { print n + 0 }' "$OUT/rpo-writes.csv")
+  failed=$((attempted - acknowledged))
+
+  body=$(mktemp)
+  code=$(curl -s -o "$body" -b "$JAR" --max-time 15 -w '%{http_code}' \
+      "$URL/api/records?runId=$RPO_RUN_ID" 2>/dev/null) || true
+
+  local found=0 missing=0 unacknowledged_stored=0 loss_span="0.0" status="verification_failed"
+  if [ "$code" = "200" ]; then
+    if stats=$(python3 - "$OUT/rpo-writes.csv" "$body" "$ITER" "$RPO_RUN_ID" <<'PY'
+import csv, json, sys
+
+with open(sys.argv[1], newline="") as f:
+    rows = [r for r in csv.DictReader(f)
+            if r["iteration"] == sys.argv[3] and r["run_id"] == sys.argv[4]]
+if not rows:
+    raise SystemExit("No RPO write attempts were recorded")
+
+with open(sys.argv[2]) as f:
+    data = json.load(f)
+
+acked_rows = [r for r in rows if r["http_code"] == "200"]
+if not acked_rows:
+    raise SystemExit("No writes were acknowledged; RPO cannot be measured")
+acked = {int(r["seq"]) for r in acked_rows}
+stored = {int(seq) for seq in data.get("seqs", [])}
+missing = acked - stored
+missing_times = [float(r["epoch"]) for r in acked_rows if int(r["seq"]) in missing]
+loss_span = max(missing_times) - min(missing_times) if missing_times else 0.0
+print(f"{len(acked & stored)},{len(missing)},{len(stored - acked)},{loss_span:.1f}")
+PY
+    ); then
+      IFS=, read -r found missing unacknowledged_stored loss_span <<< "$stats"
+      if [ "$missing" -eq 0 ]; then
+        status="no_loss"
+      else
+        status="data_loss"
+      fi
+    else
+      echo "RPO verification could not parse the stored records: $stats"
+    fi
+  else
+    echo "RPO verification request failed with HTTP $code."
+  fi
+  rm -f "$body"
+
+  echo "$ITER,$RPO_RUN_ID,$attempted,$acknowledged,$failed,$found,$missing,$unacknowledged_stored,$loss_span,$status" \
+    >> "$OUT/rpo-results.csv"
+  if [ "$status" != "no_loss" ]; then
+    RPO_FAILURES=$((RPO_FAILURES + 1))
+    echo "Iteration $ITER RPO check failed: status=$status acknowledged_missing=$missing"
+  else
+    echo "Iteration $ITER RPO check passed: acknowledged=$acknowledged missing=$missing"
+  fi
+}
 
 for ITER in $(seq 1 "$ITERATIONS"); do
   echo
@@ -166,8 +285,11 @@ for ITER in $(seq 1 "$ITERATIONS"); do
 
   # 3. Inject the failure: stop the primary Container App.
   wait_settled 180 || true     # do not let a busy app distort the timing
+  start_rpo_writer
   T_STOP=$(now)
   if ! stop_primary; then
+    stop_rpo_writer
+    verify_rpo
     record_fail "stop command failed (check permissions and API_VERSION)"
     continue
   fi
@@ -201,6 +323,9 @@ for ITER in $(seq 1 "$ITERATIONS"); do
     elapsed_gt "$T_STOP" 300 && break
     sleep 1
   done
+
+  stop_rpo_writer
+  verify_rpo
 
   # 4. Restore the primary and measure failback.
   # Let Azure finish the stop operation first; starting while it is still busy returns HTTP 409.
@@ -279,6 +404,31 @@ if ok:
     lines.append("Failed probes during failover (mean): "
                  + f"{st.mean(int(r['failed_probes']) for r in ok):.1f}")
 
+rpo_rows = list(csv.DictReader(open(f"{out}/rpo-results.csv")))
+lines.append("")
+lines.append("RPO write durability:")
+if not rpo_rows:
+    lines.append("No RPO verification completed.")
+else:
+    no_loss = [r for r in rpo_rows if r["verification_status"] == "no_loss"]
+    data_loss = [r for r in rpo_rows if r["verification_status"] == "data_loss"]
+    verify_failed = [r for r in rpo_rows if r["verification_status"] == "verification_failed"]
+    total = lambda key: sum(int(r[key]) for r in rpo_rows)
+    lines.append(f"Iterations: {len(no_loss)} no loss, {len(data_loss)} data loss, "
+                 f"{len(verify_failed)} verification failed")
+    lines.append(f"Writes attempted: {total('writes_attempted')}   acknowledged: "
+                 f"{total('writes_acknowledged')}   not acknowledged: {total('writes_failed')}")
+    lines.append(f"Acknowledged writes found: {total('acknowledged_found')}   missing: "
+                 f"{total('acknowledged_missing')}")
+    lines.append(f"Not acknowledged but stored: {total('unacknowledged_stored')}")
+    if data_loss:
+        max_span = max(float(r["loss_span_s"]) for r in data_loss)
+        lines.append(f"Maximum span of missing acknowledged writes: {max_span:.1f} s")
+    elif no_loss:
+        lines.append(f"Observed acknowledged-write loss: 0 records across {len(no_loss)} verified iteration(s)")
+    if verify_failed:
+        lines.append("RPO could not be verified for one or more iterations; see rpo-results.csv.")
+
 agg = collections.defaultdict(list)
 for r in csv.DictReader(open(f"{out}/probes.csv")):
     if r["http_code"] in ("200", "401") and r["region"]:
@@ -303,5 +453,9 @@ if ! grep -q ',ok$' "$OUT/results.csv"; then
 fi
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES iteration(s) failed. The successful ones are still in results.csv."
+  exit 1
+fi
+if [ "$RPO_FAILURES" -gt 0 ]; then
+  echo "$RPO_FAILURES RPO iteration(s) had data loss or could not be verified."
   exit 1
 fi

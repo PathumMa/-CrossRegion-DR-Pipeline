@@ -350,7 +350,9 @@ app.MapGet("/health/db", async () =>
 // ---------- RPO test endpoints (used by the DR drill) ----------
 // Every write is sent with a majority write concern. The drill records which writes were
 // acknowledged (HTTP 200) and later checks that every one of them is still in the database.
-var records = db?.GetCollection<RecordDoc>("records").WithWriteConcern(WriteConcern.WMajority);
+var records = db?.GetCollection<RecordDoc>("records")
+    .WithReadConcern(ReadConcern.Majority)
+    .WithWriteConcern(WriteConcern.WMajority);
 
 app.MapPost("/api/records", async (HttpContext ctx, RecordIn body) =>
 {

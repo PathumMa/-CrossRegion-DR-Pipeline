@@ -1,6 +1,6 @@
 # DR drill pipeline (manual only).
 # Stops the primary Container App on purpose, measures failover and failback through
-# Azure Front Door, restarts the primary, and publishes the results as an artifact.
+# Azure Front Door, verifies RPO writes, restarts the primary, and publishes the report artifacts.
 # Do not run it while the main deployment pipeline is running.
 
 name: 'drill-$(Date:yyyyMMdd)-$(Rev:r)'
