@@ -174,7 +174,9 @@ for ITER in $(seq 1 "$ITERATIONS"); do
   STOPPED=1
   echo "Primary stopped. Probing every second until the standby answers..."
 
-  T_FAIL=""; T_STANDBY=""; FAILED=0; SESSION_OK="no"
+  # Recovery means FIVE standby answers in a row, not just the first one. A single early answer can come
+  # from Front Door retrying one in-flight request, while later requests would still fail.
+  T_FAIL=""; T_STANDBY=""; FAILED=0; SESSION_OK="no"; RUN=0; RUN_START=""; RUN_SESSION="no"
   while :; do
     probe
     if [ -z "$REGION" ]; then
@@ -182,9 +184,19 @@ for ITER in $(seq 1 "$ITERATIONS"); do
       [ -z "$T_FAIL" ] && T_FAIL="$PT"
     fi
     if [ "$REGION" = "$STANDBY_REGION" ]; then
-      T_STANDBY="$PT"
-      if [ "$CODE" = "200" ] && [ "$CREATED" = "$PRIMARY_REGION" ]; then SESSION_OK="yes"; fi
-      break
+      RUN=$((RUN + 1))
+      if [ "$RUN" -eq 1 ]; then
+        RUN_START="$PT"
+        RUN_SESSION="no"
+        if [ "$CODE" = "200" ] && [ "$CREATED" = "$PRIMARY_REGION" ]; then RUN_SESSION="yes"; fi
+      fi
+      if [ "$RUN" -ge 5 ]; then
+        T_STANDBY="$RUN_START"
+        SESSION_OK="$RUN_SESSION"
+        break
+      fi
+    else
+      RUN=0
     fi
     elapsed_gt "$T_STOP" 300 && break
     sleep 1
