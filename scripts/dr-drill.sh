@@ -140,7 +140,7 @@ record_fail() { FAILURES=$((FAILURES + 1)); echo "$ITER,,,,,,,$1" >> "$OUT/resul
 rpo_write_one() {
   local iteration="$1" run_id="$2" seq="$3" body payload code region epoch
   body=$(mktemp)
-  payload=$(jq -cn --arg runId "$run_id" --argjson seq "$seq" '{runId:$run_id,seq:$seq}')
+  payload=$(jq -cn --arg run_id "$run_id" --argjson seq "$seq" '{runId:$run_id,seq:$seq}')
   code=$(curl -s -o "$body" -b "$JAR" --max-time 5 -w '%{http_code}' \
       -X POST "$URL/api/records" -H 'Content-Type: application/json' -d "$payload" 2>/dev/null) || true
   [ -n "$code" ] || code="000"
