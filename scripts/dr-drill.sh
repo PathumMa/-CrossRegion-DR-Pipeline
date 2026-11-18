@@ -185,7 +185,7 @@ stop_rpo_writer() {
 }
 
 verify_rpo() {
-  local body code stats
+  local body code stats verify_started verify_attempt=0
   local attempted acknowledged failed
 
   attempted=$(awk -F, -v i="$ITER" -v r="$RPO_RUN_ID" \
@@ -195,11 +195,26 @@ verify_rpo() {
   failed=$((attempted - acknowledged))
 
   body=$(mktemp)
-  code=$(curl -s -o "$body" -b "$JAR" --max-time 15 -w '%{http_code}' \
-      "$URL/api/records?runId=$RPO_RUN_ID" 2>/dev/null) || true
+  verify_started=$(now)
+  while :; do
+    verify_attempt=$((verify_attempt + 1))
+    code=$(curl -s -o "$body" -b "$JAR" --max-time 5 -w '%{http_code}' \
+        "$URL/api/records?runId=$RPO_RUN_ID" 2>/dev/null) || true
+    [ -n "$code" ] || code="000"
+    if [ "$code" != "404" ] || elapsed_gt "$verify_started" 30; then
+      break
+    fi
+    if [ "$verify_attempt" -eq 1 ]; then
+      echo "RPO verification returned HTTP 404; retrying for up to 30 s while Front Door failover converges."
+    fi
+    sleep 2
+  done
 
   local found=0 missing=0 unacknowledged_stored=0 loss_span="0.0" status="verification_failed"
   if [ "$code" = "200" ]; then
+    if [ "$verify_attempt" -gt 1 ]; then
+      echo "RPO verification succeeded after $verify_attempt attempts."
+    fi
     if stats=$(python3 - "$OUT/rpo-writes.csv" "$body" "$ITER" "$RPO_RUN_ID" <<'PY'
 import csv, json, sys
 
@@ -233,7 +248,7 @@ PY
       echo "RPO verification could not parse the stored records: $stats"
     fi
   else
-    echo "RPO verification request failed with HTTP $code."
+    echo "RPO verification request failed with HTTP $code after $verify_attempt attempt(s)."
   fi
   rm -f "$body"
 
