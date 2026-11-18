@@ -66,20 +66,29 @@ if (!string.IsNullOrEmpty(mongoUri))
     settings.ServerSelectionTimeout = TimeSpan.FromSeconds(5);
     var client = new MongoClient(settings);
     db = client.GetDatabase(dbName);
-    var userCollection = db.GetCollection<UserDoc>("users");
-    var sessionCollection = db.GetCollection<SessionDoc>("sessions");
-    users = userCollection;
-    sessions = sessionCollection;
+    users = db.GetCollection<UserDoc>("users");
+    sessions = db.GetCollection<SessionDoc>("sessions");
 
-    await userCollection.Indexes.CreateOneAsync(new CreateIndexModel<UserDoc>(
-        Builders<UserDoc>.IndexKeys.Ascending(u => u.Email),
-        new CreateIndexOptions { Unique = true }));
-    await sessionCollection.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
-        Builders<SessionDoc>.IndexKeys.Ascending(s => s.TokenHash),
-        new CreateIndexOptions { Unique = true }));
-    await sessionCollection.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
-        Builders<SessionDoc>.IndexKeys.Ascending(s => s.ExpiresAt),
-        new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }));
+    // Create indexes in the background so a slow database never blocks startup.
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await users.Indexes.CreateOneAsync(new CreateIndexModel<UserDoc>(
+                Builders<UserDoc>.IndexKeys.Ascending(u => u.Email),
+                new CreateIndexOptions { Unique = true }));
+            await sessions.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
+                Builders<SessionDoc>.IndexKeys.Ascending(s => s.TokenHash),
+                new CreateIndexOptions { Unique = true }));
+            await sessions.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
+                Builders<SessionDoc>.IndexKeys.Ascending(s => s.ExpiresAt),
+                new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }));
+        }
+        catch (Exception ex)
+        {
+            app.Logger.LogError(ex, "Index creation failed");
+        }
+    });
 }
 
 // ---------- Helpers ----------
@@ -207,7 +216,7 @@ string Page(string title, string active, string main, string script = "")
         """
         .Replace("__TITLE__", title)
         .Replace("__CSS__", BaseCss)
-        .Replace("__NAV__", Nav("/", "Home", "home") + Nav("/login", "Session demo", "session") + Nav("/health", "Health", "health"))
+        .Replace("__NAV__", Nav("/", "Home", "home") + Nav("/login", "Session demo", "session") + Nav("/rpo", "Data (RPO)", "rpo") + Nav("/health", "Health", "health"))
         .Replace("__MAIN__", main)
         .Replace("__SCRIPT__", script);
 }
@@ -324,6 +333,214 @@ app.MapGet("/health/db", async () =>
         app.Logger.LogError(ex, "Database ping failed");
         return Results.Json(new { status = "Unhealthy", database = "unreachable" }, statusCode: 503);
     }
+});
+
+// ---------- RPO test endpoints (used by the DR drill) ----------
+// Every write is sent with a majority write concern. The drill records which writes were
+// acknowledged (HTTP 200) and later checks that every one of them is still in the database.
+var records = db?.GetCollection<RecordDoc>("records").WithWriteConcern(WriteConcern.WMajority);
+
+app.MapPost("/api/records", async (HttpContext ctx, RecordIn body) =>
+{
+    var s = await GetSessionAsync(ctx);
+    if (s is null) return Results.Json(new { error = "Not signed in." }, statusCode: 401);
+    if (records is null) return Results.Json(new { error = "Database not configured." }, statusCode: 503);
+    if (string.IsNullOrWhiteSpace(body.RunId) || body.RunId.Length > 64)
+        return Results.BadRequest(new { error = "runId is required (max 64 characters)." });
+
+    await records.InsertOneAsync(new RecordDoc
+    {
+        RunId = body.RunId,
+        Seq = body.Seq,
+        Region = Region(),
+        CreatedUtc = DateTime.UtcNow
+    });
+    return Results.Ok(new { ok = true, seq = body.Seq, region = Region() });
+});
+
+app.MapGet("/api/records", async (HttpContext ctx, string runId) =>
+{
+    var s = await GetSessionAsync(ctx);
+    if (s is null) return Results.Json(new { error = "Not signed in." }, statusCode: 401);
+    if (records is null) return Results.Json(new { error = "Database not configured." }, statusCode: 503);
+
+    var docs = await records.Find(r => r.RunId == runId).Project(r => new { r.Seq, r.Region }).ToListAsync();
+    var seqs = docs.Select(d => d.Seq).ToList();
+    var byRegion = docs.GroupBy(d => d.Region).ToDictionary(g => g.Key, g => g.Count());
+    return Results.Ok(new { runId, count = seqs.Count, seqs, byRegion });
+});
+
+// ---------- Data durability (RPO) demo page ----------
+app.MapGet("/rpo", () =>
+{
+    var main = """
+        <h1>Data durability (RPO)</h1>
+        <p class="lead">Write numbered records while a region fails. Afterwards the page checks that every record the server acknowledged is still in the shared database. Sign in on the <a href="/login">session page</a> first.</p>
+
+        <section class="card">
+            <div class="row top">
+                <button type="button" id="start">Start writing</button>
+                <button type="button" id="stop" class="secondary" disabled>Stop writing</button>
+                <button type="button" id="verify" class="secondary">Verify</button>
+                <span class="spacer"></span>
+                <button type="button" id="clear" class="quiet">Clear</button>
+            </div>
+            <dl class="facts">
+                <dt>Records sent</dt><dd id="c-sent">0</dd>
+                <dt>Acknowledged by the server</dt><dd id="c-acked">0</dd>
+                <dt>No answer or error</dt><dd id="c-failed">0</dd>
+                <dt>Last write served by</dt><dd id="c-region">-</dd>
+            </dl>
+        </section>
+
+        <section class="card" id="result" hidden>
+            <h2>Verification</h2>
+            <p id="verdict"></p>
+            <dl class="facts">
+                <dt>Acknowledged and found</dt><dd id="r-ok"></dd>
+                <dt>Acknowledged but missing</dt><dd id="r-missing"></dd>
+                <dt>Not acknowledged but stored</dt><dd id="r-late"></dd>
+                <dt>Not acknowledged and not stored</dt><dd id="r-none"></dd>
+                <dt>Stored by Southeast Asia</dt><dd id="r-sea"></dd>
+                <dt>Stored by East Asia</dt><dd id="r-ea"></dd>
+            </dl>
+        </section>
+
+        <section class="card">
+            <div class="logbar"><h2>Write log</h2><span class="muted">Times are UTC</span></div>
+            <div id="log" class="log" data-empty="No writes yet. Click Start writing."></div>
+        </section>
+        """;
+
+    var script = """
+        (function () {
+            const $ = (id) => document.getElementById(id);
+            const logEl = $('log');
+            const stamp = (d) => d.toISOString().slice(11, 23);
+            const newRun = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32);
+            let runId = newRun(), seq = 0, timer = null, lastRegion = null;
+            const sent = new Map();
+
+            function addLog(text, cls) {
+                const div = document.createElement('div');
+                if (cls) div.className = cls;
+                div.textContent = stamp(new Date()) + '  ' + text;
+                logEl.appendChild(div);
+                while (logEl.childNodes.length > 200) logEl.removeChild(logEl.firstChild);
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+            function render() {
+                let acked = 0, failed = 0;
+                sent.forEach((v) => { if (v.state === 'acked') acked++; else if (v.state === 'failed') failed++; });
+                $('c-sent').textContent = sent.size;
+                $('c-acked').textContent = acked;
+                $('c-failed').textContent = failed;
+            }
+            function stopTimer() {
+                clearInterval(timer);
+                timer = null;
+                $('start').disabled = false;
+                $('stop').disabled = true;
+            }
+
+            async function writeOne() {
+                const n = ++seq;
+                const rec = { state: 'pending' };
+                sent.set(n, rec);
+                render();
+                try {
+                    const r = await fetch('/api/records', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ runId: runId, seq: n }),
+                        credentials: 'same-origin',
+                        signal: AbortSignal.timeout(8000)
+                    });
+                    let d = {};
+                    try { d = await r.json(); } catch (e) {}
+                    if (r.status === 200) {
+                        rec.state = 'acked';
+                        if (d.region !== lastRegion) {
+                            addLog('#' + n + ' acknowledged by ' + d.region + (lastRegion ? '  (was ' + lastRegion + ')' : ''), 'n');
+                            lastRegion = d.region;
+                            $('c-region').textContent = d.region;
+                        }
+                    } else if (r.status === 401) {
+                        rec.state = 'failed';
+                        addLog('Not signed in. Open the session page, sign in, then come back.', 'f');
+                        stopTimer();
+                    } else {
+                        rec.state = 'failed';
+                        addLog('#' + n + ' HTTP ' + r.status + (d.error ? '  ' + d.error : ''), 'f');
+                    }
+                } catch (e) {
+                    rec.state = 'failed';
+                    addLog('#' + n + ' no response', 'f');
+                }
+                render();
+            }
+
+            async function verify() {
+                $('verify').disabled = true;
+                try {
+                    const r = await fetch('/api/records?runId=' + encodeURIComponent(runId), {
+                        credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(8000)
+                    });
+                    const d = await r.json();
+                    if (r.status !== 200) throw new Error(d.error || ('HTTP ' + r.status));
+                    const stored = new Set(d.seqs);
+                    let ok = 0, late = 0, none = 0, pending = 0;
+                    const missing = [];
+                    sent.forEach((v, n) => {
+                        const has = stored.has(n);
+                        if (v.state === 'acked') { if (has) ok++; else missing.push(n); }
+                        else if (v.state === 'failed') { if (has) late++; else none++; }
+                        else pending++;
+                    });
+                    const br = d.byRegion || {};
+                    $('result').hidden = false;
+                    $('r-ok').textContent = ok;
+                    $('r-missing').textContent = missing.length ? missing.length + '  (#' + missing.slice(0, 10).join(', #') + ')' : '0';
+                    $('r-late').textContent = late;
+                    $('r-none').textContent = none + (pending ? '  (' + pending + ' still pending, verify again)' : '');
+                    $('r-sea').textContent = br['Southeast Asia'] || 0;
+                    $('r-ea').textContent = br['East Asia'] || 0;
+                    $('verdict').textContent = missing.length === 0
+                        ? 'No acknowledged write was lost. Observed data loss for this run: 0 records (RPO 0 s).'
+                        : missing.length + ' acknowledged writes are missing from the database. This is data loss.';
+                    addLog('VERIFY  acknowledged and found=' + ok + '  acknowledged but missing=' + missing.length + '  not acknowledged but stored=' + late, missing.length ? 'f' : 'n');
+                } catch (e) {
+                    addLog('VERIFY failed: ' + (e.message || e), 'f');
+                }
+                $('verify').disabled = false;
+            }
+
+            $('start').onclick = () => {
+                if (timer) return;
+                $('start').disabled = true;
+                $('stop').disabled = false;
+                addLog('Writing one record per second (run ' + runId.slice(0, 8) + ')');
+                writeOne();
+                timer = setInterval(writeOne, 1000);
+            };
+            $('stop').onclick = () => {
+                stopTimer();
+                addLog('Stopped. Wait about 10 seconds for pending requests, then click Verify.');
+            };
+            $('verify').onclick = verify;
+            $('clear').onclick = () => {
+                stopTimer();
+                runId = newRun(); seq = 0; lastRegion = null;
+                sent.clear();
+                logEl.textContent = '';
+                $('result').hidden = true;
+                $('c-region').textContent = '-';
+                render();
+            };
+        })();
+        """;
+
+    return Results.Content(Page("Data durability (RPO)", "rpo", main, script), "text/html");
 });
 
 // ---------- Session demo page ----------
@@ -679,4 +896,15 @@ class SessionDoc
     public DateTime CreatedAtUtc { get; set; }
     public DateTime LastSeenUtc { get; set; }
     public DateTime ExpiresAt { get; set; }
+}
+
+record RecordIn(string? RunId, int Seq);
+
+class RecordDoc
+{
+    [BsonId] public ObjectId Id { get; set; }
+    public string RunId { get; set; } = "";
+    public int Seq { get; set; }
+    public string Region { get; set; } = "";
+    public DateTime CreatedUtc { get; set; }
 }
