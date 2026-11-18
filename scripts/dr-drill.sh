@@ -50,19 +50,27 @@ wait_settled() {
   done
 }
 
-# Call the stop or start API, retrying if Azure reports a conflict or a transient error.
-# The error text from az is left visible in the pipeline log on purpose.
+# Short status line for the log, to help diagnose "operation in progress" conflicts.
+app_status() {
+  az containerapp show --name "$PRIMARY_APP" --resource-group "$PRIMARY_RG" \
+     --query "[properties.provisioningState, properties.runningStatus]" -o tsv 2>/dev/null | tr '\t\n' '  ' || true
+}
+
+# Call the stop or start API. If Azure answers with a conflict (another operation still running),
+# keep retrying every 20 s for up to 15 minutes. The az error text stays visible in the log.
 lifecycle() {
-  local action="$1" n
-  for n in 1 2 3 4 5 6 7 8 9 10; do
-    wait_settled 180 || echo "Note: app still busy after 180 s, trying anyway"
+  local action="$1" t0 n=0
+  t0=$(now)
+  while :; do
+    n=$((n + 1))
+    wait_settled 60 || true
     if az rest --method POST --url "$BASE/$action?api-version=$API_VERSION" --only-show-errors >/dev/null; then
       return 0
     fi
-    echo "The $action call failed (attempt $n of 10). Retrying in 20 s..."
+    echo "The $action call failed (attempt $n, $(diff_s "$(now)" "$t0") s so far). App state: $(app_status). Retrying in 20 s..."
+    elapsed_gt "$t0" 900 && return 1
     sleep 20
   done
-  return 1
 }
 stop_primary()  { lifecycle stop; }
 start_primary() { lifecycle start; }
@@ -124,21 +132,37 @@ for ITER in $(seq 1 "$ITERATIONS"); do
   echo
   echo "=== Iteration $ITER of $ITERATIONS ==="
 
-  # 1. Start from a healthy state: Front Door must be serving from the primary.
-  if ! wait_for_region "$PRIMARY_REGION" 3 600; then
-    record_fail "primary not serving before the drill"
+  # 1 and 2. Start only from a settled state. After a failback, Front Door's edge locations take a
+  # while to agree that the primary is healthy again. Starting a new failure too early gives
+  # misleadingly short outages (the standby is already answering some requests before the stop).
+  # So: 30 consecutive answers from the primary, then a 10-second baseline that must be clean.
+  READY=0
+  for TRY in 1 2 3; do
+    if ! wait_for_region "$PRIMARY_REGION" 30 600; then
+      break
+    fi
+    login
+    probe
+    if [ "$CODE" != "200" ] || [ "$CREATED" != "$PRIMARY_REGION" ]; then
+      echo "Sign-in check failed (HTTP $CODE, session created in '$CREATED'). Trying again..."
+      sleep 10
+      continue
+    fi
+    echo "Session created in $CREATED. Baseline for 10 seconds..."
+    BASE_BAD=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      probe
+      [ "$REGION" != "$PRIMARY_REGION" ] && BASE_BAD=$((BASE_BAD + 1))
+      sleep 1
+    done
+    if [ "$BASE_BAD" -eq 0 ]; then READY=1; break; fi
+    echo "Baseline not clean: $BASE_BAD of 10 responses did not come from $PRIMARY_REGION. Waiting 30 s and trying again ($TRY of 3)..."
+    sleep 30
+  done
+  if [ "$READY" != "1" ]; then
+    record_fail "Front Door was not stably serving from the primary before the drill"
     continue
   fi
-
-  # 2. Create a session while the primary is serving.
-  login
-  probe
-  if [ "$CODE" != "200" ] || [ "$CREATED" != "$PRIMARY_REGION" ]; then
-    record_fail "sign-in failed (HTTP $CODE, session created in '$CREATED')"
-    continue
-  fi
-  echo "Session created in $CREATED. Baseline for 5 seconds..."
-  for _ in 1 2 3 4 5; do probe; sleep 1; done
 
   # 3. Inject the failure: stop the primary Container App.
   wait_settled 180 || true     # do not let a busy app distort the timing
