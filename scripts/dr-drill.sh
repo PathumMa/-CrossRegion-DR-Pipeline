@@ -33,8 +33,39 @@ now()        { date +%s.%N; }
 elapsed_gt() { awk -v a="$(now)" -v b="$1" -v l="$2" 'BEGIN{exit !(a-b>l)}'; }
 diff_s()     { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f", a-b}'; }
 
-stop_primary()  { az rest --method POST --url "$BASE/stop?api-version=$API_VERSION"  --only-show-errors >/dev/null; }
-start_primary() { az rest --method POST --url "$BASE/start?api-version=$API_VERSION" --only-show-errors >/dev/null; }
+app_state() {
+  az containerapp show --name "$PRIMARY_APP" --resource-group "$PRIMARY_RG" \
+     --query properties.provisioningState -o tsv 2>/dev/null || echo "Unknown"
+}
+
+# Wait until Azure is not busy with another operation on the app (avoids conflict errors).
+wait_settled() {
+  local limit="$1" t0 s
+  t0=$(now)
+  while :; do
+    s=$(app_state)
+    case "$s" in Succeeded|Failed|Canceled|Unknown) return 0 ;; esac
+    elapsed_gt "$t0" "$limit" && return 1
+    sleep 5
+  done
+}
+
+# Call the stop or start API, retrying if Azure reports a conflict or a transient error.
+# The error text from az is left visible in the pipeline log on purpose.
+lifecycle() {
+  local action="$1" n
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    wait_settled 180 || echo "Note: app still busy after 180 s, trying anyway"
+    if az rest --method POST --url "$BASE/$action?api-version=$API_VERSION" --only-show-errors >/dev/null; then
+      return 0
+    fi
+    echo "The $action call failed (attempt $n of 10). Retrying in 20 s..."
+    sleep 20
+  done
+  return 1
+}
+stop_primary()  { lifecycle stop; }
+start_primary() { lifecycle start; }
 
 # Safety net: never leave the primary stopped if the script exits early or is cancelled.
 cleanup() {
@@ -86,7 +117,8 @@ login() {
        -H 'Content-Type: application/json' -d "$payload" || true
 }
 
-record_fail() { echo "$ITER,,,,,,,$1" >> "$OUT/results.csv"; echo "Iteration $ITER FAILED: $1"; }
+FAILURES=0
+record_fail() { FAILURES=$((FAILURES + 1)); echo "$ITER,,,,,,,$1" >> "$OUT/results.csv"; echo "Iteration $ITER FAILED: $1"; }
 
 for ITER in $(seq 1 "$ITERATIONS"); do
   echo
@@ -109,6 +141,7 @@ for ITER in $(seq 1 "$ITERATIONS"); do
   for _ in 1 2 3 4 5; do probe; sleep 1; done
 
   # 3. Inject the failure: stop the primary Container App.
+  wait_settled 180 || true     # do not let a busy app distort the timing
   T_STOP=$(now)
   if ! stop_primary; then
     record_fail "stop command failed (check permissions and API_VERSION)"
@@ -134,6 +167,9 @@ for ITER in $(seq 1 "$ITERATIONS"); do
   done
 
   # 4. Restore the primary and measure failback.
+  # Let Azure finish the stop operation first; starting while it is still busy returns HTTP 409.
+  # This waiting happens before the timer starts, so it is not counted as failback time.
+  wait_settled 300 || true
   T_START=$(now)
   if ! start_primary; then
     record_fail "start command failed (primary may still be stopped)"
@@ -224,8 +260,12 @@ print(text)
 open(f"{out}/summary.txt", "w").write(text + "\n")
 PY
 
-# Fail the pipeline if no iteration completed, so an empty drill is never mistaken for a pass.
+# Fail the pipeline if any iteration failed, so a partial drill is never mistaken for a pass.
 if ! grep -q ',ok$' "$OUT/results.csv"; then
   echo "No iteration completed successfully."
+  exit 1
+fi
+if [ "$FAILURES" -gt 0 ]; then
+  echo "$FAILURES iteration(s) failed. The successful ones are still in results.csv."
   exit 1
 fi
