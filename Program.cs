@@ -66,20 +66,29 @@ if (!string.IsNullOrEmpty(mongoUri))
     settings.ServerSelectionTimeout = TimeSpan.FromSeconds(5);
     var client = new MongoClient(settings);
     db = client.GetDatabase(dbName);
-    var userCollection = db.GetCollection<UserDoc>("users");
-    var sessionCollection = db.GetCollection<SessionDoc>("sessions");
-    users = userCollection;
-    sessions = sessionCollection;
+    users = db.GetCollection<UserDoc>("users");
+    sessions = db.GetCollection<SessionDoc>("sessions");
 
-    await userCollection.Indexes.CreateOneAsync(new CreateIndexModel<UserDoc>(
-        Builders<UserDoc>.IndexKeys.Ascending(u => u.Email),
-        new CreateIndexOptions { Unique = true }));
-    await sessionCollection.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
-        Builders<SessionDoc>.IndexKeys.Ascending(s => s.TokenHash),
-        new CreateIndexOptions { Unique = true }));
-    await sessionCollection.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
-        Builders<SessionDoc>.IndexKeys.Ascending(s => s.ExpiresAt),
-        new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }));
+    // Create indexes in the background so a slow database never blocks startup.
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await users.Indexes.CreateOneAsync(new CreateIndexModel<UserDoc>(
+                Builders<UserDoc>.IndexKeys.Ascending(u => u.Email),
+                new CreateIndexOptions { Unique = true }));
+            await sessions.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
+                Builders<SessionDoc>.IndexKeys.Ascending(s => s.TokenHash),
+                new CreateIndexOptions { Unique = true }));
+            await sessions.Indexes.CreateOneAsync(new CreateIndexModel<SessionDoc>(
+                Builders<SessionDoc>.IndexKeys.Ascending(s => s.ExpiresAt),
+                new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }));
+        }
+        catch (Exception ex)
+        {
+            app.Logger.LogError(ex, "Index creation failed");
+        }
+    });
 }
 
 // ---------- Helpers ----------
@@ -176,7 +185,19 @@ const string BaseCss = """
         .log{background:#0F1633;color:#DDE3F5;border-radius:10px;padding:12px 14px;font:12.5px/1.6 Consolas,"Cascadia Mono",monospace;height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word}
         .log:empty::before{content:attr(data-empty);color:#8190B8}
         .log .f{color:#FF9B93}.log .n{color:#8AA0FF}
-        @media (max-width:640px){.board{grid-template-columns:1fr}.big{font-size:1.8rem}}
+        .explain{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin-bottom:16px}
+        .explain h2{margin:0 0 6px}
+        .explain p{margin:0 0 8px;color:var(--muted)}
+        .steps{margin:6px 0 0;padding-left:22px}
+        .steps li{margin:4px 0}
+        .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
+        .linkcard{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 20px}
+        .linkcard:hover{border-color:var(--navy)}
+        .linkcard .t{font-weight:650;font-size:1.05rem;color:var(--navy)}
+        .linkcard .d{color:var(--muted);font-size:.92rem;margin-top:4px}
+        .pill{display:inline-block;padding:2px 12px;border-radius:999px;background:#EEF0F8;color:var(--navy);font-size:.85rem;font-weight:600}
+        .terms p{margin:0 0 10px}
+        @media (max-width:640px){.board,.grid2{grid-template-columns:1fr}.big{font-size:1.8rem}}
         """;
 
 string Page(string title, string active, string main, string script = "")
@@ -207,7 +228,7 @@ string Page(string title, string active, string main, string script = "")
         """
         .Replace("__TITLE__", title)
         .Replace("__CSS__", BaseCss)
-        .Replace("__NAV__", Nav("/", "Home", "home") + Nav("/login", "Session demo", "session") + Nav("/health", "Health", "health"))
+        .Replace("__NAV__", Nav("/", "Home", "home") + Nav("/failover", "Failover test", "session") + Nav("/data", "Data test", "rpo") + Nav("/health", "Health", "health"))
         .Replace("__MAIN__", main)
         .Replace("__SCRIPT__", script);
 }
@@ -326,12 +347,287 @@ app.MapGet("/health/db", async () =>
     }
 });
 
-// ---------- Session demo page ----------
-app.MapGet("/login", () =>
+// ---------- RPO test endpoints (used by the DR drill) ----------
+// Every write is sent with a majority write concern. The drill records which writes were
+// acknowledged (HTTP 200) and later checks that every one of them is still in the database.
+var records = db?.GetCollection<RecordDoc>("records")
+    .WithReadConcern(ReadConcern.Majority)
+    .WithWriteConcern(WriteConcern.WMajority);
+
+app.MapPost("/api/records", async (HttpContext ctx, RecordIn body) =>
+{
+    var s = await GetSessionAsync(ctx);
+    if (s is null) return Results.Json(new { error = "Not signed in." }, statusCode: 401);
+    if (records is null) return Results.Json(new { error = "Database not configured." }, statusCode: 503);
+    if (string.IsNullOrWhiteSpace(body.RunId) || body.RunId.Length > 64)
+        return Results.BadRequest(new { error = "runId is required (max 64 characters)." });
+
+    await records.InsertOneAsync(new RecordDoc
+    {
+        RunId = body.RunId,
+        Seq = body.Seq,
+        Region = Region(),
+        CreatedUtc = DateTime.UtcNow
+    });
+    return Results.Ok(new { ok = true, seq = body.Seq, region = Region() });
+});
+
+app.MapGet("/api/records", async (HttpContext ctx, string runId) =>
+{
+    var s = await GetSessionAsync(ctx);
+    if (s is null) return Results.Json(new { error = "Not signed in." }, statusCode: 401);
+    if (records is null) return Results.Json(new { error = "Database not configured." }, statusCode: 503);
+
+    var docs = await records.Find(r => r.RunId == runId).Project(r => new { r.Seq, r.Region }).ToListAsync();
+    var seqs = docs.Select(d => d.Seq).ToList();
+    var byRegion = docs.GroupBy(d => d.Region).ToDictionary(g => g.Key, g => g.Count());
+    return Results.Ok(new { runId, count = seqs.Count, seqs, byRegion });
+});
+
+// ---------- Data test page (durability of writes, RPO) ----------
+app.MapGet("/rpo", () => Results.Redirect("/data"));
+app.MapGet("/login", () => Results.Redirect("/failover"));
+
+app.MapGet("/data", () =>
 {
     var main = """
-        <h1>Session demo</h1>
-        <p class="lead">Sign in, turn on auto-check, then stop the primary region. Your session should carry on from the other region.</p>
+        <h1>Data test: durability of writes (RPO)</h1>
+        <p class="lead">This test shows whether any data is lost when the primary region fails.</p>
+
+        <section class="explain">
+            <h2>What this test shows</h2>
+            <p>The page writes one numbered record per second to the shared database. The server acknowledges a record only after a majority of the database replica set members have stored it. After the failover, Verify compares every acknowledged record with what is stored in the database.</p>
+            <p>An acknowledged record that is missing would be data loss. Records that were not acknowledged because the region failed during the request are counted separately, because the client was told that they failed.</p>
+            <h2 style="margin-top:12px">How to run it</h2>
+            <ol class="steps">
+                <li>Sign in on the <a href="/failover">Failover test</a> page.</li>
+                <li>Click Start writing and wait about 20 seconds.</li>
+                <li>Stop the primary Container App in the Azure portal. Keep writing while the standby takes over.</li>
+                <li>Start the primary again and wait until the log shows writes served by Southeast Asia.</li>
+                <li>Click Stop writing, wait 10 seconds, then click Verify.</li>
+                <li>Click Copy log to save the evidence.</li>
+            </ol>
+        </section>
+
+        <section class="card">
+            <div class="row top">
+                <button type="button" id="start">Start writing</button>
+                <button type="button" id="stop" class="secondary" disabled>Stop writing</button>
+                <button type="button" id="verify" class="secondary">Verify</button>
+                <span class="spacer"></span>
+                <span id="state" class="pill">Idle</span>
+            </div>
+            <dl class="facts">
+                <dt>Records sent</dt><dd id="c-sent">0</dd>
+                <dt>Acknowledged by the server</dt><dd id="c-acked">0</dd>
+                <dt>No answer or error</dt><dd id="c-failed">0</dd>
+                <dt>Last write served by</dt><dd id="c-region">-</dd>
+            </dl>
+        </section>
+
+        <section class="card" id="result" hidden>
+            <h2>Verification result</h2>
+            <div id="verdict" class="banner" role="status"></div>
+            <dl class="facts">
+                <dt>Acknowledged and found</dt><dd id="r-ok"></dd>
+                <dt>Acknowledged but missing</dt><dd id="r-missing"></dd>
+                <dt>Observed data loss</dt><dd id="r-loss"></dd>
+                <dt>Not acknowledged but stored</dt><dd id="r-late"></dd>
+                <dt>Not acknowledged and not stored</dt><dd id="r-none"></dd>
+                <dt>Stored by Southeast Asia</dt><dd id="r-sea"></dd>
+                <dt>Stored by East Asia</dt><dd id="r-ea"></dd>
+            </dl>
+        </section>
+
+        <section class="card">
+            <div class="logbar"><h2>Write log</h2><span class="muted">Times are UTC</span></div>
+            <div class="row top">
+                <span class="spacer"></span>
+                <button type="button" id="copy" class="quiet">Copy log</button>
+                <button type="button" id="clear" class="quiet" title="Clears the log and the results, and starts a new run">Clear log</button>
+            </div>
+            <div id="log" class="log" data-empty="No writes yet. Click Start writing."></div>
+        </section>
+        """;
+
+    var script = """
+        (function () {
+            const $ = (id) => document.getElementById(id);
+            const logEl = $('log');
+            const stamp = (d) => d.toISOString().slice(11, 23);
+            const newRun = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32);
+            let runId = newRun(), seq = 0, timer = null, lastRegion = null, lines = [];
+            const sent = new Map();
+
+            function addLog(text, cls) {
+                const t = stamp(new Date());
+                lines.push(t + '  ' + text);
+                if (lines.length > 1000) lines.shift();
+                const div = document.createElement('div');
+                if (cls) div.className = cls;
+                div.textContent = t + '  ' + text;
+                logEl.appendChild(div);
+                while (logEl.childNodes.length > 200) logEl.removeChild(logEl.firstChild);
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+            function render() {
+                let acked = 0, failed = 0;
+                sent.forEach((v) => { if (v.state === 'acked') acked++; else if (v.state === 'failed') failed++; });
+                $('c-sent').textContent = sent.size;
+                $('c-acked').textContent = acked;
+                $('c-failed').textContent = failed;
+            }
+            function stopTimer() {
+                clearInterval(timer);
+                timer = null;
+                $('start').disabled = false;
+                $('stop').disabled = true;
+            }
+
+            async function writeOne() {
+                const n = ++seq;
+                const rec = { state: 'pending', ack: 0 };
+                sent.set(n, rec);
+                render();
+                try {
+                    const r = await fetch('/api/records', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ runId: runId, seq: n }),
+                        credentials: 'same-origin',
+                        signal: AbortSignal.timeout(8000)
+                    });
+                    let d = {};
+                    try { d = await r.json(); } catch (e) {}
+                    if (r.status === 200) {
+                        rec.state = 'acked';
+                        rec.ack = Date.now();
+                        if (d.region !== lastRegion) {
+                            addLog('#' + n + ' acknowledged by ' + d.region + (lastRegion ? '  (previous: ' + lastRegion + ')' : ''), 'n');
+                            lastRegion = d.region;
+                            $('c-region').textContent = d.region;
+                        }
+                    } else if (r.status === 401) {
+                        rec.state = 'failed';
+                        addLog('Not signed in. Sign in on the Failover test page, then come back.', 'f');
+                        stopTimer();
+                        $('state').textContent = 'Stopped';
+                    } else {
+                        rec.state = 'failed';
+                        addLog('#' + n + ' failed: HTTP ' + r.status + (d.error ? '  ' + d.error : ''), 'f');
+                    }
+                } catch (e) {
+                    rec.state = 'failed';
+                    addLog('#' + n + ' failed: no response', 'f');
+                }
+                render();
+            }
+
+            async function verify() {
+                $('verify').disabled = true;
+                try {
+                    const r = await fetch('/api/records?runId=' + encodeURIComponent(runId), {
+                        credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(8000)
+                    });
+                    const d = await r.json();
+                    if (r.status !== 200) throw new Error(d.error || ('HTTP ' + r.status));
+                    const stored = new Set(d.seqs);
+                    let ok = 0, late = 0, none = 0, pending = 0;
+                    const missing = [], missingAck = [];
+                    sent.forEach((v, n) => {
+                        const has = stored.has(n);
+                        if (v.state === 'acked') { if (has) ok++; else { missing.push(n); missingAck.push(v.ack); } }
+                        else if (v.state === 'failed') { if (has) late++; else none++; }
+                        else pending++;
+                    });
+                    const br = d.byRegion || {};
+                    const loss = missing.length
+                        ? ((Math.max.apply(null, missingAck) - Math.min.apply(null, missingAck)) / 1000).toFixed(1) + ' s span, ' + missing.length + ' records'
+                        : '0 records (0 s)';
+
+                    $('result').hidden = false;
+                    $('r-ok').textContent = ok;
+                    $('r-missing').textContent = missing.length ? missing.length + '  (#' + missing.slice(0, 10).join(', #') + ')' : '0';
+                    $('r-loss').textContent = loss;
+                    $('r-late').textContent = late;
+                    $('r-none').textContent = none + (pending ? '  (' + pending + ' still pending, verify again)' : '');
+                    $('r-sea').textContent = br['Southeast Asia'] || 0;
+                    $('r-ea').textContent = br['East Asia'] || 0;
+
+                    const v = $('verdict');
+                    if (missing.length === 0) {
+                        v.className = 'banner show ok';
+                        v.textContent = 'No acknowledged record was lost. Observed data loss: 0 records (0 s).';
+                    } else {
+                        v.className = 'banner show fail';
+                        v.textContent = missing.length + ' acknowledged records are missing from the database. This is data loss.';
+                    }
+
+                    addLog('VERIFY  sent=' + sent.size + '  acknowledged=' + (ok + missing.length) + '  acknowledged and found=' + ok + '  acknowledged but missing=' + missing.length, missing.length ? 'f' : 'n');
+                    addLog('VERIFY  not acknowledged but stored=' + late + '  not acknowledged and not stored=' + none + '  pending=' + pending, 'n');
+                    addLog('VERIFY  stored by Southeast Asia=' + (br['Southeast Asia'] || 0) + '  stored by East Asia=' + (br['East Asia'] || 0), 'n');
+                    addLog('VERIFY  observed data loss: ' + loss, missing.length ? 'f' : 'n');
+                } catch (e) {
+                    addLog('VERIFY failed: ' + (e.message || e), 'f');
+                }
+                $('verify').disabled = false;
+            }
+
+            $('start').onclick = () => {
+                if (timer) return;
+                $('start').disabled = true;
+                $('stop').disabled = false;
+                $('state').textContent = 'Writing';
+                addLog('Run ' + runId + ': writing one record per second');
+                writeOne();
+                timer = setInterval(writeOne, 1000);
+            };
+            $('stop').onclick = () => {
+                stopTimer();
+                $('state').textContent = 'Stopped';
+                addLog('Stopped. Wait about 10 seconds for pending requests, then click Verify.');
+            };
+            $('verify').onclick = verify;
+            $('copy').onclick = async () => {
+                try { await navigator.clipboard.writeText('Run ' + runId + '\n' + lines.join('\n')); $('copy').textContent = 'Copied'; }
+                catch (e) { $('copy').textContent = 'Copy failed'; }
+                setTimeout(() => { $('copy').textContent = 'Copy log'; }, 1500);
+            };
+            $('clear').onclick = () => {
+                stopTimer();
+                runId = newRun(); seq = 0; lastRegion = null; lines = [];
+                sent.clear();
+                logEl.textContent = '';
+                $('result').hidden = true;
+                $('c-region').textContent = '-';
+                $('state').textContent = 'Idle';
+                render();
+            };
+        })();
+        """;
+
+    return Results.Content(Page("Data test", "rpo", main, script), "text/html");
+});
+
+// ---------- Failover test page (availability and sessions, RTO) ----------
+app.MapGet("/failover", () =>
+{
+    var main = """
+        <h1>Failover test: availability and sessions (RTO)</h1>
+        <p class="lead">This test shows how long the application is unavailable when the primary region fails, and whether a signed-in user stays signed in.</p>
+
+        <section class="explain">
+            <h2>What this test shows</h2>
+            <p>The page checks your session through Azure Front Door every 2 seconds. Sessions are stored in the shared database, so the standby region can continue a session that was created in the primary region. The outage length in the banner is the time from the first failed request to the first answer from a healthy region. The automated drill pipeline uses a stricter rule, so quote its figures in the report.</p>
+            <h2 style="margin-top:12px">How to run it</h2>
+            <ol class="steps">
+                <li>Create an account or sign in.</li>
+                <li>Turn on Check session every 2 seconds.</li>
+                <li>Stop the primary Container App in the Azure portal.</li>
+                <li>Watch the primary tile turn red and the standby take over. A banner reports the outage length.</li>
+                <li>Start the primary again to see failback, then click Copy log to save the evidence.</li>
+            </ol>
+        </section>
 
         <div id="banner" class="banner" role="status" aria-live="polite"></div>
 
@@ -355,7 +651,7 @@ app.MapGet("/login", () =>
 
         <section class="card">
             <div id="signedOut">
-                <h2>Sign in</h2>
+                <h2>Test account</h2>
                 <form id="authForm" novalidate>
                     <label for="email">Email</label>
                     <input id="email" type="email" autocomplete="username" placeholder="demo.user@example.com">
@@ -582,7 +878,7 @@ app.MapGet("/login", () =>
         })();
         """;
 
-    return Results.Content(Page("Session demo", "session", main, script), "text/html");
+    return Results.Content(Page("Failover test", "session", main, script), "text/html");
 });
 
 // ---------- Home page ----------
@@ -593,7 +889,8 @@ app.MapGet("/", () =>
 
     var main = """
         <h1>Cross-region disaster recovery demo</h1>
-        <p class="lead">Two copies of this app run in different Azure regions behind Azure Front Door. If one region stops responding, traffic moves to the other and your session stays signed in.</p>
+        <p class="lead">This application runs in two Azure regions behind Azure Front Door. Front Door sends traffic to the primary region (Southeast Asia) and moves it to the standby region (East Asia) if the primary stops responding. Both regions use the same MongoDB Atlas database. Two tests show what happens during a regional failure.</p>
+
         <section class="card hero" data-region="__REGION__">
             <div class="muted">This page was served from</div>
             <div class="big">__REGION__</div>
@@ -601,8 +898,26 @@ app.MapGet("/", () =>
                 <dt>Version</dt><dd>__VERSION__</dd>
                 <dt>Server time (UTC)</dt><dd>__TIME__</dd>
             </dl>
+        </section>
+
+        <div class="grid2">
+            <a class="linkcard" href="/failover">
+                <div class="t">Failover test (RTO)</div>
+                <div class="d">How long users wait when the primary region fails, and whether their session survives.</div>
+            </a>
+            <a class="linkcard" href="/data">
+                <div class="t">Data test (RPO)</div>
+                <div class="d">Writes records during a failure and checks that no acknowledged record is lost.</div>
+            </a>
+        </div>
+
+        <section class="card terms">
+            <h2>Key terms</h2>
+            <p><strong>RTO (recovery time objective)</strong> is how long the service may be unavailable after a failure. The Failover test measures the observed recovery time.</p>
+            <p><strong>RPO (recovery point objective)</strong> is how much data may be lost, expressed as an amount of data or a period of time. The Data test measures the observed data loss.</p>
+            <p><strong>Failback</strong> is the return of traffic to the primary region after it recovers.</p>
             <div class="row">
-                <a class="btn" href="/login">Open session demo</a>
+                <a class="btn secondary" href="/health">Health check</a>
                 <a class="btn secondary" href="/weatherforecast">Sample API</a>
             </div>
         </section>
@@ -652,8 +967,6 @@ app.MapGet("/weatherforecast", () =>
 app.Run();
 
 // ---------- Types ----------
-public partial class Program { }
-
 record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 {
     public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
@@ -679,4 +992,15 @@ class SessionDoc
     public DateTime CreatedAtUtc { get; set; }
     public DateTime LastSeenUtc { get; set; }
     public DateTime ExpiresAt { get; set; }
+}
+
+record RecordIn(string? RunId, int Seq);
+
+class RecordDoc
+{
+    [BsonId] public ObjectId Id { get; set; }
+    public string RunId { get; set; } = "";
+    public int Seq { get; set; }
+    public string Region { get; set; } = "";
+    public DateTime CreatedUtc { get; set; }
 }
