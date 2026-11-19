@@ -8,6 +8,19 @@ namespace DemoApi.Tests;
 public sealed class HealthEndpointTests
 {
     [Fact]
+    public async Task HealthLinksOpenInNewTab()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        using var client = factory.CreateClient();
+
+        var homePage = await client.GetStringAsync("/");
+
+        Assert.Contains("<a href=\"/health\" target=\"_blank\" rel=\"noopener noreferrer\">Health</a>", homePage);
+        Assert.Contains("<a class=\"btn secondary\" href=\"/health\" target=\"_blank\" rel=\"noopener noreferrer\">Health check</a>", homePage);
+        Assert.Contains("<a class=\"btn secondary\" href=\"/weatherforecast\" target=\"_blank\" rel=\"noopener noreferrer\">Sample API</a>", homePage);
+    }
+
+    [Fact]
     public async Task HealthEndpointsRemainAvailableWhenMongoIsNotConfigured()
     {
         var originalMongoUri = Environment.GetEnvironmentVariable("MONGODB_URI");
