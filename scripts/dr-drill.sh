@@ -301,6 +301,9 @@ for ITER in $(seq 1 "$ITERATIONS"); do
   # 3. Inject the failure: stop the primary Container App.
   wait_settled 180 || true     # do not let a busy app distort the timing
   start_rpo_writer
+  echo "Writing for 15 seconds before the failure..."
+  sleep 15
+  wait_settled 180 || true
   T_STOP=$(now)
   if ! stop_primary; then
     stop_rpo_writer
